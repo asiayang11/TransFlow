@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 .venv/
+.venv-babeldoc/
 runtime/*
 !runtime/.gitkeep
 __pycache__/

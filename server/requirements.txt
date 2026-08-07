@@ -1,2 +1,2 @@
+pdf2zh-next==2.8.2
 pypdf==6.10.0
-

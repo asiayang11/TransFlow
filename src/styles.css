@@ -44,6 +44,7 @@ button { color: inherit; }
 .model-state.is-warning i { background: #db8747; }
 .secondary-button, .primary-button { border: 0; border-radius: 10px; cursor: pointer; font-weight: 600; }
 .secondary-button { background: white; border: 1px solid var(--line); padding: 9px 14px; }
+.download-button { color: var(--green); text-decoration: none; }
 .primary-button { background: var(--green); color: white; padding: 11px 18px; box-shadow: 0 7px 16px rgba(40, 92, 71, .16); }
 
 .upload-view { min-height: calc(100vh - 72px); max-width: 1180px; margin: 0 auto; padding: 72px 36px 36px; display: grid; grid-template-columns: .88fr 1.12fr; gap: 80px; align-items: center; position: relative; }
@@ -120,12 +121,12 @@ button { color: inherit; }
 .document-pane > header span { font-size: 9px; font-weight: 700; letter-spacing: .14em; color: #8d938d; }
 .document-pane > header strong { font-size: 12px; font-weight: 600; }
 .pdf-canvas-host { min-height: calc(100vh - 192px); padding: 16px; display: flex; justify-content: center; align-items: flex-start; position: relative; overflow: auto; }
-.pdf-canvas-host canvas { display: block; max-width: 100%; height: auto !important; background: white; box-shadow: 0 5px 18px rgba(38,46,40,.14); }
+.pdf-page-surface { position: relative; flex: 0 0 auto; background: white; box-shadow: 0 5px 18px rgba(38,46,40,.14); overflow: hidden; }
+.pdf-canvas-host canvas { display: block; width: 100%; height: 100%; background: white; }
 .page-loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 8px; }
 .page-loading span { width: 13px; height: 13px; border: 2px solid #c9cec8; border-top-color: var(--green); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .translation-page { margin: 16px; min-height: calc(100vh - 224px); background: var(--paper); box-shadow: 0 5px 18px rgba(38,46,40,.12); padding: clamp(28px, 4vw, 64px); }
-.translated-copy { white-space: pre-wrap; color: #303731; font-family: Georgia, "Songti SC", serif; font-size: clamp(14px, 1.1vw, 17px); line-height: 1.88; }
 .translation-message { min-height: 450px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--muted); }
 .translation-message h3 { color: var(--ink); font-family: Manrope, sans-serif; margin: 18px 0 8px; font-size: 18px; }
 .translation-message p { max-width: 330px; line-height: 1.6; font-size: 12px; margin: 0 0 24px; }
@@ -177,4 +178,3 @@ button { color: inherit; }
   .document-pane { min-height: 520px; }
   .translation-page, .pdf-canvas-host { min-height: 480px; }
 }
-

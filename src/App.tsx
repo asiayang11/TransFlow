@@ -163,7 +163,15 @@ export default function App() {
             </span>
           )}
           {documentRecord && (
-            <button className="secondary-button" onClick={reset}>翻译新文档</button>
+            <>
+              {documentRecord.translated_pdf_ready && (
+                <a
+                  className="secondary-button download-button"
+                  href={`/api/v1/documents/${documentRecord.id}/translated.pdf`}
+                >下载译文 PDF</a>
+              )}
+              <button className="secondary-button" onClick={reset}>翻译新文档</button>
+            </>
           )}
         </div>
       </header>
@@ -173,7 +181,7 @@ export default function App() {
           <div className="hero-copy">
             <span className="eyebrow">PAGE-BY-PAGE TRANSLATION</span>
             <h1>让每一页，<br />都在语境里被理解。</h1>
-            <p>拖入 PDF。TransFlow 会读取文字与版面视觉信息，提前翻译前 5 页，让原文与译文始终并排。</p>
+            <p>拖入 PDF。TransFlow 会优先翻译前 5 页，并用 PDFMathTranslate 重建译文页面，让原文与译文始终并排。</p>
           </div>
 
           <div className="upload-panel">
@@ -235,7 +243,7 @@ export default function App() {
           </div>
 
           <div className="trust-row">
-            <span>视觉上下文</span>
+            <span>原版式重建</span>
             <span>逐页缓存</span>
             <span>左右对照</span>
           </div>
@@ -299,15 +307,22 @@ export default function App() {
             <div className="comparison-grid">
               <article className="document-pane source-pane">
                 <header><span>ORIGINAL</span><strong>原文</strong></header>
-                {fileUrl && <PdfCanvas fileUrl={fileUrl} pageNumber={currentPage} />}
+                {fileUrl && (
+                  <PdfCanvas fileUrl={fileUrl} pageNumber={currentPage} loadingLabel="正在渲染原文页" />
+                )}
               </article>
 
               <article className="document-pane translation-pane">
                 <header><span>TRANSLATION</span><strong>{selectedLanguage}</strong></header>
-                <div className="translation-page">
-                  {pageResult?.status === "ready" && pageResult.translated_text ? (
-                    <div className="translated-copy">{pageResult.translated_text}</div>
-                  ) : pageResult?.status === "error" ? (
+                {pageResult?.status === "ready" && pageResult.translated_pdf_url ? (
+                  <PdfCanvas
+                    fileUrl={`${pageResult.translated_pdf_url}?v=${encodeURIComponent(pageResult.updated_at || "ready")}`}
+                    pageNumber={1}
+                    loadingLabel="正在渲染译文 PDF 页"
+                  />
+                ) : (
+                  <div className="translation-page">
+                    {pageResult?.status === "error" ? (
                     <div className="translation-message error-state">
                       <span>!</span>
                       <h3>这一页没有翻译成功</h3>
@@ -318,11 +333,12 @@ export default function App() {
                     <div className="translation-message">
                       <div className="thinking-mark"><i /><i /><i /></div>
                       <h3>{pageResult?.status === "pending" ? "准备翻译" : "正在理解这一页"}</h3>
-                      <p>模型正在结合页面文字、版面和视觉内容生成译文。</p>
+                      <p>PDFMathTranslate 正在分析版面、翻译文本并重建这一页。</p>
                       <div className="text-skeleton"><span /><span /><span /><span /><span /></div>
                     </div>
-                  )}
-                </div>
+                    )}
+                  </div>
+                )}
               </article>
             </div>
             {error && <div className="error-banner workspace-error">{error}</div>}
@@ -332,4 +348,3 @@ export default function App() {
     </main>
   );
 }
-

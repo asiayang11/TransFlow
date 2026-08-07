@@ -16,13 +16,13 @@ export interface DocumentRecord {
   status: "active" | "error";
   created_at: string;
   prefetch_pages: number;
+  translated_pdf_ready: boolean;
   pages: PageSummary[];
 }
 
 export interface PageResult extends PageSummary {
   source_text: string;
-  translated_text: string | null;
-  usage: Record<string, number> | null;
+  translated_pdf_url: string | null;
 }
 
 export interface HealthRecord {
@@ -30,6 +30,8 @@ export interface HealthRecord {
   llm_mode: "openai" | "mock";
   llm_configured: boolean;
   model: string;
+  engine: string;
+  base_url_configured: boolean;
   prefetch_pages: number;
 }
 
@@ -39,4 +41,3 @@ export interface ApiErrorShape {
     message?: string;
   };
 }
-

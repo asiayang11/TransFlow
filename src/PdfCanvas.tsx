@@ -7,17 +7,25 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 interface PdfCanvasProps {
   fileUrl: string;
   pageNumber: number;
+  loadingLabel?: string;
 }
 
-export default function PdfCanvas({ fileUrl, pageNumber }: PdfCanvasProps) {
+interface RenderSize {
+  width: number;
+  height: number;
+}
+
+export default function PdfCanvas({ fileUrl, pageNumber, loadingLabel }: PdfCanvasProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [renderSize, setRenderSize] = useState<RenderSize | null>(null);
 
   useEffect(() => {
     let disposed = false;
     let renderTask: { cancel: () => void; promise: Promise<void> } | null = null;
+    let documentTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
     const host = hostRef.current;
     const canvas = canvasRef.current;
     if (!host || !canvas) return;
@@ -26,7 +34,7 @@ export default function PdfCanvas({ fileUrl, pageNumber }: PdfCanvasProps) {
       setLoading(true);
       setError(null);
       try {
-        const documentTask = pdfjsLib.getDocument(fileUrl);
+        documentTask = pdfjsLib.getDocument(fileUrl);
         const pdf = await documentTask.promise;
         const page = await pdf.getPage(pageNumber);
         const baseViewport = page.getViewport({ scale: 1 });
@@ -41,6 +49,7 @@ export default function PdfCanvas({ fileUrl, pageNumber }: PdfCanvasProps) {
         canvas.height = Math.floor(viewport.height * ratio);
         canvas.style.width = `${Math.floor(viewport.width)}px`;
         canvas.style.height = `${Math.floor(viewport.height)}px`;
+        setRenderSize({ width: Math.floor(viewport.width), height: Math.floor(viewport.height) });
         renderTask = page.render({
           canvasContext: context,
           viewport,
@@ -60,14 +69,24 @@ export default function PdfCanvas({ fileUrl, pageNumber }: PdfCanvasProps) {
     return () => {
       disposed = true;
       renderTask?.cancel();
+      void documentTask?.destroy();
     };
   }, [fileUrl, pageNumber]);
 
   return (
     <div className="pdf-canvas-host" ref={hostRef}>
-      {loading && <div className="page-loading"><span />正在渲染原文页</div>}
+      {loading && (
+        <div className="page-loading">
+          <span />{loadingLabel || "正在渲染 PDF 页面"}
+        </div>
+      )}
       {error && <div className="inline-error">{error}</div>}
-      <canvas ref={canvasRef} aria-label={`PDF 第 ${pageNumber} 页`} />
+      <div
+        className="pdf-page-surface"
+        style={renderSize ? { width: renderSize.width, height: renderSize.height } : undefined}
+      >
+        <canvas ref={canvasRef} aria-label={`PDF 第 ${pageNumber} 页`} />
+      </div>
     </div>
   );
 }
