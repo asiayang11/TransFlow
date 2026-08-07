@@ -5,10 +5,13 @@
 ## MVP 能力
 
 - 拖拽上传 PDF，校验格式、大小、加密状态和页数；
-- 上传后优先翻译前 5 页，之后滚动补齐整本；
+- 上传后优先处理当前页，并在后台预取后续 4 页；切换页面会自动调整队列优先级；
 - PDFMathTranslate/BabelDOC 保留插图、公式、表格和页面几何；
 - Ark/OpenAI-compatible `base_url`、`api_key`、`model` 配置；
 - 左右 PDF.js 同尺度逐页对照、页级状态与失败重试；
+- 每页展示真实处理进度和当前阶段，100% 后才加载译文 PDF；
+- DocLayout 与 OpenAI Client/Translator 进程级复用，RapidOCR 仅在页面检测到表格时按需加载；
+- 页级记录队列、各阶段、LLM 请求、缓存命中、429 与 Token 指标；
 - 逐页译文 PDF 缓存，全部完成后合并并提供下载；
 - 本地 HTTP API 与持久化元数据，契约见 `docs/openapi.yaml`。
 

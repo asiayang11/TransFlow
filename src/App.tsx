@@ -23,14 +23,37 @@ const LANGUAGE_OPTIONS = [
 const STATUS_LABEL: Record<PageStatus, string> = {
   pending: "等待",
   queued: "队列中",
+  preparing: "准备模型",
+  analyzing: "分析页面",
   translating: "翻译中",
+  typesetting: "重建版面",
+  generating: "生成 PDF",
+  validating: "验证页面",
   ready: "已缓存",
   error: "失败",
 };
 
+const ACTIVE_STATUSES: PageStatus[] = [
+  "queued",
+  "preparing",
+  "analyzing",
+  "translating",
+  "typesetting",
+  "generating",
+  "validating",
+];
+
 function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function queueCopy(page?: PageResult | DocumentRecord["pages"][number]) {
+  if (!page || page.status !== "queued") return null;
+  if (page.queue_position) {
+    return `当前排在第 ${page.queue_position} 位${page.queue_total ? `，队列共 ${page.queue_total} 页` : ""}。切换到本页后已自动提升优先级。`;
+  }
+  return "正在取得版面处理资源，即将开始。";
 }
 
 export default function App() {
@@ -76,16 +99,16 @@ export default function App() {
 
   useEffect(() => {
     if (!documentRecord) return;
-    const active = documentRecord.pages.some((page) =>
-      ["queued", "translating"].includes(page.status),
+    const active = documentRecord.pages.some((page) => ACTIVE_STATUSES.includes(page.status));
+    const currentActive = pageResult && (
+      pageResult.status === "pending" || ACTIVE_STATUSES.includes(pageResult.status)
     );
-    const currentActive = pageResult && ["pending", "queued", "translating"].includes(pageResult.status);
     if (!active && !currentActive) return;
 
     const timer = window.setInterval(() => {
       void refreshDocument();
       void refreshPage();
-    }, 1200);
+    }, 700);
     return () => window.clearInterval(timer);
   }, [documentRecord, pageResult?.status, refreshDocument, refreshPage]);
 
@@ -141,6 +164,7 @@ export default function App() {
   );
 
   const currentSummary = documentRecord?.pages[currentPage - 1];
+  const visibleProgress = pageResult ?? currentSummary;
   const selectedLanguage = LANGUAGE_OPTIONS.find((item) => item.value === targetLanguage)?.label;
 
   return (
@@ -181,7 +205,7 @@ export default function App() {
           <div className="hero-copy">
             <span className="eyebrow">PAGE-BY-PAGE TRANSLATION</span>
             <h1>让每一页，<br />都在语境里被理解。</h1>
-            <p>拖入 PDF。TransFlow 会优先翻译前 5 页，并用 PDFMathTranslate 重建译文页面，让原文与译文始终并排。</p>
+            <p>拖入 PDF。TransFlow 会优先翻译当前页并预取后续 4 页，用 PDFMathTranslate 重建译文页面，让原文与译文始终并排。</p>
           </div>
 
           <div className="upload-panel">
@@ -270,8 +294,22 @@ export default function App() {
                   onClick={() => setCurrentPage(page.page_number)}
                 >
                   <span className="page-number">{String(page.page_number).padStart(2, "0")}</span>
-                  <span className="page-label">第 {page.page_number} 页</span>
-                  <i className={`status-dot status-${page.status}`} title={STATUS_LABEL[page.status]} />
+                  <span className="page-progress-copy">
+                    <span className="page-label">第 {page.page_number} 页</span>
+                    <span className="page-stage" title={page.stage_label}>{page.stage_label}</span>
+                    <span className="page-progress-track" aria-hidden="true">
+                      <i style={{ width: `${page.progress}%` }} />
+                    </span>
+                  </span>
+                  <span className={`page-progress-value status-${page.status}`}>
+                    {page.status === "ready"
+                      ? "✓"
+                      : page.status === "error"
+                        ? "!"
+                        : page.status === "queued" && page.queue_position
+                          ? `#${page.queue_position}`
+                          : `${page.progress}%`}
+                  </span>
                 </button>
               ))}
             </div>
@@ -298,7 +336,7 @@ export default function App() {
               </div>
               <div className="toolbar-status">
                 <span className={`status-pill status-${currentSummary?.status || "pending"}`}>
-                  <i />{STATUS_LABEL[currentSummary?.status || "pending"]}
+                  <i />{currentSummary?.stage_label || STATUS_LABEL[currentSummary?.status || "pending"]}
                 </span>
                 <span>目标：{selectedLanguage}</span>
               </div>
@@ -331,10 +369,31 @@ export default function App() {
                     </div>
                   ) : (
                     <div className="translation-message">
-                      <div className="thinking-mark"><i /><i /><i /></div>
-                      <h3>{pageResult?.status === "pending" ? "准备翻译" : "正在理解这一页"}</h3>
-                      <p>PDFMathTranslate 正在分析版面、翻译文本并重建这一页。</p>
-                      <div className="text-skeleton"><span /><span /><span /><span /><span /></div>
+                      <div className="progress-percentage">{visibleProgress?.progress ?? 0}<small>%</small></div>
+                      <h3>{visibleProgress?.stage_label || "等待调度"}</h3>
+                      <p>
+                        {visibleProgress?.status === "queued"
+                          ? queueCopy(visibleProgress)
+                          : "PDFMathTranslate 正在保留插图和公式，并重建对应的译文页面。"}
+                      </p>
+                      <div
+                        className="translation-progress-track"
+                        role="progressbar"
+                        aria-label={`第 ${currentPage} 页翻译进度`}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={visibleProgress?.progress ?? 0}
+                      >
+                        <span style={{ width: `${visibleProgress?.progress ?? 0}%` }} />
+                      </div>
+                      <div className="progress-meta">
+                        <span>
+                          {visibleProgress?.status === "queued" && visibleProgress.queue_position
+                            ? `队列第 ${visibleProgress.queue_position} 位`
+                            : STATUS_LABEL[visibleProgress?.status || "pending"]}
+                        </span>
+                        <strong>{visibleProgress?.progress ?? 0}%</strong>
+                      </div>
                     </div>
                     )}
                   </div>
