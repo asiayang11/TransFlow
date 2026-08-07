@@ -1,0 +1,335 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import PdfCanvas from "./PdfCanvas";
+import {
+  getDocument,
+  getHealth,
+  getPage,
+  prefetchPages,
+  translatePage,
+  uploadDocument,
+} from "./api";
+import type { DocumentRecord, HealthRecord, PageResult, PageStatus } from "./types";
+
+const LANGUAGE_OPTIONS = [
+  { value: "zh-CN", label: "简体中文" },
+  { value: "en", label: "English" },
+  { value: "ja", label: "日本語" },
+  { value: "ko", label: "한국어" },
+  { value: "fr", label: "Français" },
+  { value: "de", label: "Deutsch" },
+  { value: "es", label: "Español" },
+];
+
+const STATUS_LABEL: Record<PageStatus, string> = {
+  pending: "等待",
+  queued: "队列中",
+  translating: "翻译中",
+  ready: "已缓存",
+  error: "失败",
+};
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+export default function App() {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [health, setHealth] = useState<HealthRecord | null>(null);
+  const [targetLanguage, setTargetLanguage] = useState("zh-CN");
+  const [documentRecord, setDocumentRecord] = useState<DocumentRecord | null>(null);
+  const [pageResult, setPageResult] = useState<PageResult | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [fileUrl, setFileUrl] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getHealth().then(setHealth).catch(() => setHealth(null));
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (fileUrl) URL.revokeObjectURL(fileUrl);
+    };
+  }, [fileUrl]);
+
+  const refreshDocument = useCallback(async () => {
+    if (!documentRecord) return;
+    const next = await getDocument(documentRecord.id);
+    setDocumentRecord(next);
+  }, [documentRecord?.id]);
+
+  const refreshPage = useCallback(async () => {
+    if (!documentRecord) return;
+    const next = await getPage(documentRecord.id, currentPage);
+    setPageResult(next);
+  }, [documentRecord?.id, currentPage]);
+
+  useEffect(() => {
+    if (!documentRecord) return;
+    setPageResult(null);
+    void prefetchPages(documentRecord.id, currentPage, documentRecord.prefetch_pages);
+    void refreshPage();
+  }, [documentRecord?.id, currentPage]);
+
+  useEffect(() => {
+    if (!documentRecord) return;
+    const active = documentRecord.pages.some((page) =>
+      ["queued", "translating"].includes(page.status),
+    );
+    const currentActive = pageResult && ["pending", "queued", "translating"].includes(pageResult.status);
+    if (!active && !currentActive) return;
+
+    const timer = window.setInterval(() => {
+      void refreshDocument();
+      void refreshPage();
+    }, 1200);
+    return () => window.clearInterval(timer);
+  }, [documentRecord, pageResult?.status, refreshDocument, refreshPage]);
+
+  const handleFile = async (file?: File) => {
+    if (!file) return;
+    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+      setError("请拖入 PDF 文件。");
+      return;
+    }
+
+    setError(null);
+    setUploading(true);
+    const nextUrl = URL.createObjectURL(file);
+    try {
+      const created = await uploadDocument(file, targetLanguage);
+      if (fileUrl) URL.revokeObjectURL(fileUrl);
+      setFileUrl(nextUrl);
+      setDocumentRecord(created);
+      setCurrentPage(1);
+      setPageResult(null);
+    } catch (uploadError) {
+      URL.revokeObjectURL(nextUrl);
+      setError(uploadError instanceof Error ? uploadError.message : "上传失败");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const reset = () => {
+    if (fileUrl) URL.revokeObjectURL(fileUrl);
+    setFileUrl(null);
+    setDocumentRecord(null);
+    setPageResult(null);
+    setCurrentPage(1);
+    setError(null);
+  };
+
+  const retryCurrent = async () => {
+    if (!documentRecord) return;
+    setError(null);
+    try {
+      await translatePage(documentRecord.id, currentPage);
+      await refreshDocument();
+      await refreshPage();
+    } catch (retryError) {
+      setError(retryError instanceof Error ? retryError.message : "重试失败");
+    }
+  };
+
+  const readyCount = useMemo(
+    () => documentRecord?.pages.filter((page) => page.status === "ready").length ?? 0,
+    [documentRecord],
+  );
+
+  const currentSummary = documentRecord?.pages[currentPage - 1];
+  const selectedLanguage = LANGUAGE_OPTIONS.find((item) => item.value === targetLanguage)?.label;
+
+  return (
+    <main className="app-shell">
+      <header className="topbar">
+        <button className="brand" onClick={reset} aria-label="返回上传页">
+          <span className="brand-mark">T</span>
+          <span>TransFlow</span>
+          <small>文档翻译工作台</small>
+        </button>
+        <div className="topbar-actions">
+          {health && (
+            <span className={`model-state ${health.llm_configured ? "is-ready" : "is-warning"}`}>
+              <i />
+              {health.llm_mode === "mock"
+                ? "演示模型"
+                : health.llm_configured
+                  ? health.model
+                  : "等待 API Key"}
+            </span>
+          )}
+          {documentRecord && (
+            <button className="secondary-button" onClick={reset}>翻译新文档</button>
+          )}
+        </div>
+      </header>
+
+      {!documentRecord ? (
+        <section className="upload-view">
+          <div className="hero-copy">
+            <span className="eyebrow">PAGE-BY-PAGE TRANSLATION</span>
+            <h1>让每一页，<br />都在语境里被理解。</h1>
+            <p>拖入 PDF。TransFlow 会读取文字与版面视觉信息，提前翻译前 5 页，让原文与译文始终并排。</p>
+          </div>
+
+          <div className="upload-panel">
+            <div
+              className={`dropzone ${dragging ? "is-dragging" : ""} ${uploading ? "is-uploading" : ""}`}
+              onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
+              onDragOver={(event) => event.preventDefault()}
+              onDragLeave={(event) => { event.preventDefault(); setDragging(false); }}
+              onDrop={(event) => {
+                event.preventDefault();
+                setDragging(false);
+                void handleFile(event.dataTransfer.files[0]);
+              }}
+              onClick={() => !uploading && inputRef.current?.click()}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") inputRef.current?.click();
+              }}
+            >
+              <input
+                ref={inputRef}
+                type="file"
+                accept="application/pdf,.pdf"
+                hidden
+                onChange={(event) => void handleFile(event.target.files?.[0])}
+              />
+              <div className="upload-icon"><span>PDF</span></div>
+              {uploading ? (
+                <>
+                  <h2>正在读取文档</h2>
+                  <p>解析页数和文字，随后自动预热前 5 页。</p>
+                  <div className="progress-track"><span /></div>
+                </>
+              ) : (
+                <>
+                  <h2>{dragging ? "松手即可上传" : "把 PDF 拖到这里"}</h2>
+                  <p>或点击选择文件 · 最大 50 MB</p>
+                  <button className="primary-button" type="button">选择 PDF</button>
+                </>
+              )}
+            </div>
+
+            <div className="upload-options">
+              <label>
+                <span>翻译为</span>
+                <select value={targetLanguage} onChange={(event) => setTargetLanguage(event.target.value)}>
+                  {LANGUAGE_OPTIONS.map((language) => (
+                    <option value={language.value} key={language.value}>{language.label}</option>
+                  ))}
+                </select>
+              </label>
+              <div className="privacy-note">
+                <span>本机存储</span>
+                <p>文件保存在本地后端，不创建公开链接。</p>
+              </div>
+            </div>
+            {error && <div className="error-banner">{error}</div>}
+          </div>
+
+          <div className="trust-row">
+            <span>视觉上下文</span>
+            <span>逐页缓存</span>
+            <span>左右对照</span>
+          </div>
+        </section>
+      ) : (
+        <section className="workspace-view">
+          <aside className="page-rail">
+            <div className="document-meta">
+              <span className="file-badge">PDF</span>
+              <div>
+                <strong title={documentRecord.filename}>{documentRecord.filename}</strong>
+                <small>{documentRecord.page_count} 页 · {formatBytes(documentRecord.size_bytes)}</small>
+              </div>
+            </div>
+            <div className="cache-summary">
+              <div><strong>{readyCount}</strong><span>已缓存</span></div>
+              <div><strong>{documentRecord.page_count}</strong><span>总页数</span></div>
+            </div>
+            <div className="page-list" aria-label="页面列表">
+              {documentRecord.pages.map((page) => (
+                <button
+                  key={page.page_number}
+                  className={`page-item ${currentPage === page.page_number ? "is-active" : ""}`}
+                  onClick={() => setCurrentPage(page.page_number)}
+                >
+                  <span className="page-number">{String(page.page_number).padStart(2, "0")}</span>
+                  <span className="page-label">第 {page.page_number} 页</span>
+                  <i className={`status-dot status-${page.status}`} title={STATUS_LABEL[page.status]} />
+                </button>
+              ))}
+            </div>
+          </aside>
+
+          <div className="comparison-area">
+            <div className="workspace-toolbar">
+              <div>
+                <span className="eyebrow">BILINGUAL VIEW</span>
+                <h2>第 {currentPage} 页</h2>
+              </div>
+              <div className="page-controls">
+                <button
+                  onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                  disabled={currentPage === 1}
+                  aria-label="上一页"
+                >←</button>
+                <span>{currentPage} / {documentRecord.page_count}</span>
+                <button
+                  onClick={() => setCurrentPage((page) => Math.min(documentRecord.page_count, page + 1))}
+                  disabled={currentPage === documentRecord.page_count}
+                  aria-label="下一页"
+                >→</button>
+              </div>
+              <div className="toolbar-status">
+                <span className={`status-pill status-${currentSummary?.status || "pending"}`}>
+                  <i />{STATUS_LABEL[currentSummary?.status || "pending"]}
+                </span>
+                <span>目标：{selectedLanguage}</span>
+              </div>
+            </div>
+
+            <div className="comparison-grid">
+              <article className="document-pane source-pane">
+                <header><span>ORIGINAL</span><strong>原文</strong></header>
+                {fileUrl && <PdfCanvas fileUrl={fileUrl} pageNumber={currentPage} />}
+              </article>
+
+              <article className="document-pane translation-pane">
+                <header><span>TRANSLATION</span><strong>{selectedLanguage}</strong></header>
+                <div className="translation-page">
+                  {pageResult?.status === "ready" && pageResult.translated_text ? (
+                    <div className="translated-copy">{pageResult.translated_text}</div>
+                  ) : pageResult?.status === "error" ? (
+                    <div className="translation-message error-state">
+                      <span>!</span>
+                      <h3>这一页没有翻译成功</h3>
+                      <p>{pageResult.error || "模型请求失败，请重试。"}</p>
+                      <button className="primary-button" onClick={() => void retryCurrent()}>重新翻译</button>
+                    </div>
+                  ) : (
+                    <div className="translation-message">
+                      <div className="thinking-mark"><i /><i /><i /></div>
+                      <h3>{pageResult?.status === "pending" ? "准备翻译" : "正在理解这一页"}</h3>
+                      <p>模型正在结合页面文字、版面和视觉内容生成译文。</p>
+                      <div className="text-skeleton"><span /><span /><span /><span /><span /></div>
+                    </div>
+                  )}
+                </div>
+              </article>
+            </div>
+            {error && <div className="error-banner workspace-error">{error}</div>}
+          </div>
+        </section>
+      )}
+    </main>
+  );
+}
+

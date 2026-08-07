@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.venv/
+runtime/*
+!runtime/.gitkeep
+__pycache__/
+*.pyc
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+.DS_Store
+tmp/

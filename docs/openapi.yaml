@@ -1,0 +1,161 @@
+openapi: 3.1.0
+info:
+  title: TransFlow MVP API
+  version: 0.1.0
+  description: 本地 PDF 元数据、逐页翻译与 5 页预热接口。
+servers:
+  - url: http://127.0.0.1:8787
+paths:
+  /api/v1/health:
+    get:
+      summary: 查询服务和模型配置状态
+      responses:
+        "200":
+          description: 服务可用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /api/v1/documents:
+    post:
+      summary: 上传 PDF 并自动预热前 5 页
+      parameters:
+        - in: header
+          name: X-Filename
+          required: true
+          schema: { type: string }
+        - in: header
+          name: X-Target-Language
+          required: false
+          schema: { type: string, default: zh-CN }
+      requestBody:
+        required: true
+        content:
+          application/pdf:
+            schema: { type: string, format: binary }
+      responses:
+        "201":
+          description: 文档创建成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+        "413": { description: 文件超过 50 MB }
+        "422": { description: PDF 无效、加密或没有页面 }
+  /api/v1/documents/{document_id}:
+    get:
+      summary: 获取文档和每页状态
+      parameters:
+        - $ref: "#/components/parameters/DocumentId"
+      responses:
+        "200":
+          description: 文档状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+  /api/v1/documents/{document_id}/pages/{page_number}:
+    get:
+      summary: 获取原文、译文和当前页状态
+      parameters:
+        - $ref: "#/components/parameters/DocumentId"
+        - $ref: "#/components/parameters/PageNumber"
+      responses:
+        "200":
+          description: 页面结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageResult"
+  /api/v1/documents/{document_id}/pages/{page_number}/preview:
+    get:
+      summary: 获取后端渲染的页面 PNG
+      parameters:
+        - $ref: "#/components/parameters/DocumentId"
+        - $ref: "#/components/parameters/PageNumber"
+      responses:
+        "200":
+          description: 页面图像
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+  /api/v1/documents/{document_id}/pages/{page_number}/translate:
+    post:
+      summary: 强制重新翻译一页
+      parameters:
+        - $ref: "#/components/parameters/DocumentId"
+        - $ref: "#/components/parameters/PageNumber"
+      responses:
+        "202": { description: 已加入队列 }
+  /api/v1/documents/{document_id}/prefetch:
+    post:
+      summary: 从指定页起预热连续页面
+      parameters:
+        - $ref: "#/components/parameters/DocumentId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                start_page: { type: integer, minimum: 1 }
+                count: { type: integer, minimum: 1, maximum: 10, default: 5 }
+              required: [start_page]
+      responses:
+        "202": { description: 已加入队列 }
+components:
+  parameters:
+    DocumentId:
+      in: path
+      name: document_id
+      required: true
+      schema: { type: string }
+    PageNumber:
+      in: path
+      name: page_number
+      required: true
+      schema: { type: integer, minimum: 1 }
+  schemas:
+    Health:
+      type: object
+      properties:
+        status: { const: ok }
+        llm_mode: { enum: [openai, mock] }
+        llm_configured: { type: boolean }
+        model: { type: string }
+        prefetch_pages: { type: integer }
+      required: [status, llm_mode, llm_configured, model, prefetch_pages]
+    PageSummary:
+      type: object
+      properties:
+        page_number: { type: integer }
+        status: { enum: [pending, queued, translating, ready, error] }
+        error: { type: [string, "null"] }
+        updated_at: { type: [string, "null"] }
+      required: [page_number, status, error, updated_at]
+    Document:
+      type: object
+      properties:
+        id: { type: string }
+        filename: { type: string }
+        size_bytes: { type: integer }
+        page_count: { type: integer }
+        target_language: { type: string }
+        status: { enum: [active, error] }
+        created_at: { type: string }
+        prefetch_pages: { type: integer }
+        pages:
+          type: array
+          items: { $ref: "#/components/schemas/PageSummary" }
+      required: [id, filename, size_bytes, page_count, target_language, status, created_at, prefetch_pages, pages]
+    PageResult:
+      allOf:
+        - $ref: "#/components/schemas/PageSummary"
+        - type: object
+          properties:
+            source_text: { type: string }
+            translated_text: { type: [string, "null"] }
+            usage: { type: [object, "null"], additionalProperties: true }
+          required: [source_text, translated_text, usage]
+
