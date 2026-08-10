@@ -56,6 +56,20 @@ function queueCopy(page?: PageResult | DocumentRecord["pages"][number]) {
   return "正在取得版面处理资源，即将开始。";
 }
 
+function locationTask(): { documentId: string; page: number } | null {
+  const match = window.location.pathname.match(/^\/tasks\/([a-f0-9]{32})\/?$/);
+  if (!match) return null;
+  const requestedPage = Number(new URLSearchParams(window.location.search).get("page"));
+  return {
+    documentId: match[1],
+    page: Number.isInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1,
+  };
+}
+
+function taskUrl(documentId: string, page: number) {
+  return `/tasks/${documentId}?page=${page}`;
+}
+
 export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [health, setHealth] = useState<HealthRecord | null>(null);
@@ -63,20 +77,50 @@ export default function App() {
   const [documentRecord, setDocumentRecord] = useState<DocumentRecord | null>(null);
   const [pageResult, setPageResult] = useState<PageResult | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
-  const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [restoringTask, setRestoringTask] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     getHealth().then(setHealth).catch(() => setHealth(null));
   }, []);
 
+  const restoreFromLocation = useCallback(async () => {
+    const task = locationTask();
+    if (!task) {
+      setDocumentRecord(null);
+      setPageResult(null);
+      setCurrentPage(1);
+      return;
+    }
+    setRestoringTask(true);
+    setError(null);
+    try {
+      const restored = await getDocument(task.documentId);
+      const restoredPage = Math.min(restored.page_count, task.page);
+      setDocumentRecord(restored);
+      setTargetLanguage(restored.target_language);
+      setCurrentPage(restoredPage);
+      setPageResult(null);
+      if (restoredPage !== task.page) {
+        window.history.replaceState(null, "", taskUrl(restored.id, restoredPage));
+      }
+    } catch (restoreError) {
+      setDocumentRecord(null);
+      setPageResult(null);
+      setError(restoreError instanceof Error ? restoreError.message : "无法恢复翻译任务");
+    } finally {
+      setRestoringTask(false);
+    }
+  }, []);
+
   useEffect(() => {
-    return () => {
-      if (fileUrl) URL.revokeObjectURL(fileUrl);
-    };
-  }, [fileUrl]);
+    void restoreFromLocation();
+    const handlePopState = () => void restoreFromLocation();
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [restoreFromLocation]);
 
   const refreshDocument = useCallback(async () => {
     if (!documentRecord) return;
@@ -92,6 +136,11 @@ export default function App() {
 
   useEffect(() => {
     if (!documentRecord) return;
+    window.history.replaceState(
+      null,
+      "",
+      taskUrl(documentRecord.id, currentPage),
+    );
     setPageResult(null);
     void prefetchPages(documentRecord.id, currentPage, documentRecord.prefetch_pages);
     void refreshPage();
@@ -121,16 +170,13 @@ export default function App() {
 
     setError(null);
     setUploading(true);
-    const nextUrl = URL.createObjectURL(file);
     try {
       const created = await uploadDocument(file, targetLanguage);
-      if (fileUrl) URL.revokeObjectURL(fileUrl);
-      setFileUrl(nextUrl);
       setDocumentRecord(created);
       setCurrentPage(1);
       setPageResult(null);
+      window.history.pushState(null, "", taskUrl(created.id, 1));
     } catch (uploadError) {
-      URL.revokeObjectURL(nextUrl);
       setError(uploadError instanceof Error ? uploadError.message : "上传失败");
     } finally {
       setUploading(false);
@@ -138,12 +184,11 @@ export default function App() {
   };
 
   const reset = () => {
-    if (fileUrl) URL.revokeObjectURL(fileUrl);
-    setFileUrl(null);
     setDocumentRecord(null);
     setPageResult(null);
     setCurrentPage(1);
     setError(null);
+    window.history.pushState(null, "", "/");
   };
 
   const retryCurrent = async () => {
@@ -166,6 +211,9 @@ export default function App() {
   const currentSummary = documentRecord?.pages[currentPage - 1];
   const visibleProgress = pageResult ?? currentSummary;
   const selectedLanguage = LANGUAGE_OPTIONS.find((item) => item.value === targetLanguage)?.label;
+  const fileUrl = documentRecord
+    ? `/api/v1/documents/${documentRecord.id}/source.pdf`
+    : null;
 
   return (
     <main className="app-shell">
@@ -234,10 +282,10 @@ export default function App() {
                 onChange={(event) => void handleFile(event.target.files?.[0])}
               />
               <div className="upload-icon"><span>PDF</span></div>
-              {uploading ? (
+              {uploading || restoringTask ? (
                 <>
-                  <h2>正在读取文档</h2>
-                  <p>解析页数和文字，随后自动预热前 5 页。</p>
+                  <h2>{restoringTask ? "正在恢复翻译任务" : "正在读取文档"}</h2>
+                  <p>{restoringTask ? "正在载入页面状态和已缓存译文。" : "解析页数和文字，随后自动预热前 5 页。"}</p>
                   <div className="progress-track"><span /></div>
                 </>
               ) : (

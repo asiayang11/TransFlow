@@ -55,6 +55,23 @@ FRONTEND_ORIGIN = os.getenv("TRANSFLOW_FRONTEND_ORIGIN", "http://127.0.0.1:5173"
 DATA_DIR = (ROOT / os.getenv("TRANSFLOW_DATA_DIR", "runtime")).resolve()
 PREFETCH_PAGES = max(1, min(10, int(os.getenv("TRANSFLOW_PREFETCH_PAGES", "5"))))
 MAX_WORKERS = max(1, min(4, int(os.getenv("TRANSFLOW_MAX_WORKERS", "2"))))
+LLM_QPS = max(1, min(50, int(os.getenv("TRANSFLOW_LLM_QPS", "4"))))
+LLM_WORKERS = max(1, min(16, int(os.getenv("TRANSFLOW_LLM_WORKERS", "4"))))
+LLM_MAX_IN_FLIGHT = max(
+    1, min(16, int(os.getenv("TRANSFLOW_LLM_MAX_IN_FLIGHT", "4")))
+)
+LLM_MAX_ATTEMPTS = max(1, min(10, int(os.getenv("TRANSFLOW_LLM_MAX_ATTEMPTS", "3"))))
+LLM_TIMEOUT_SECONDS = max(
+    15, min(600, int(os.getenv("TRANSFLOW_LLM_TIMEOUT_SECONDS", "120")))
+)
+KEEP_JOB_FILES = os.getenv("TRANSFLOW_KEEP_JOB_FILES", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+TRANSLATE_TABLE_TEXT = os.getenv(
+    "TRANSFLOW_TRANSLATE_TABLE_TEXT", "false"
+).lower() in {"1", "true", "yes"}
 MAX_FILE_SIZE = 50 * 1024 * 1024
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 if OPENAI_API_KEY == "sk-your-key-here":
@@ -70,12 +87,16 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 ENGINE_VERSION = 4
 LOCK = threading.RLock()
-BABELDOC_LOCK = threading.Lock()
+BABELDOC_SETUP_LOCK = threading.Lock()
+MERGE_LOCK = threading.Lock()
+SOURCE_PAGE_LOCK = threading.Lock()
+LLM_IN_FLIGHT = threading.BoundedSemaphore(LLM_MAX_IN_FLIGHT)
+TRANSLATOR_CALL_CONTEXT = threading.local()
 DOCUMENTS: dict[str, dict[str, Any]] = {}
 
 FOREGROUND_PRIORITY = 0
 PREFETCH_PRIORITY = 100
-SCHEDULER_WORKERS = MAX_WORKERS if LLM_MODE == "mock" else 1
+SCHEDULER_WORKERS = MAX_WORKERS
 
 ACTIVE_PAGE_STATUSES = {
     "queued",
@@ -112,8 +133,11 @@ BABELDOC_STAGE_MAP: dict[str, tuple[str, str, int, int]] = {
 class PageTelemetry:
     """Thread-safe timings for one page translation run."""
 
-    def __init__(self, queued_at: str | None):
+    def __init__(self, document_id: str, page_number: int, queued_at: str | None):
+        self.document_id = document_id
+        self.page_number = page_number
         self.started = time.monotonic()
+        self.started_at = utc_now()
         self.stage_started = self.started
         self.stage_name = "worker"
         self.lock = threading.Lock()
@@ -129,8 +153,11 @@ class PageTelemetry:
             "llm_error_count": 0,
             "llm_latency_ms_total": 0,
             "llm_latency_ms_max": 0,
+            "llm_in_flight_wait_ms_total": 0,
             "prompt_tokens": 0,
             "completion_tokens": 0,
+            "source_page_reused": False,
+            "source_page_create_ms": 0,
             "layout_model_reused": False,
             "layout_model_load_ms": 0,
             "translator_reused": False,
@@ -138,6 +165,7 @@ class PageTelemetry:
             "table_ocr_used": False,
             "table_model_reused": False,
             "table_model_load_ms": 0,
+            "job_cleanup_ms": 0,
         }
 
     @staticmethod
@@ -161,19 +189,40 @@ class PageTelemetry:
             self.stage_started = now
             return self._snapshot_locked(now)
 
-    def record_llm_attempt(self, elapsed_ms: int, error: Exception | None) -> None:
+    def record_llm_attempt(
+        self,
+        elapsed_ms: int,
+        wait_ms: int,
+        error: Exception | None,
+        response: Any | None = None,
+    ) -> None:
         with self.lock:
             self.values["llm_request_attempts"] += 1
             self.values["llm_latency_ms_total"] += elapsed_ms
             self.values["llm_latency_ms_max"] = max(
                 self.values["llm_latency_ms_max"], elapsed_ms
             )
+            self.values["llm_in_flight_wait_ms_total"] += wait_ms
             if error:
                 self.values["llm_error_count"] += 1
                 if error.__class__.__name__ == "RateLimitError" or getattr(
                     error, "status_code", None
                 ) == 429:
                     self.values["llm_rate_limit_errors"] += 1
+            usage = getattr(response, "usage", None)
+            if usage:
+                self.values["prompt_tokens"] += int(
+                    getattr(usage, "prompt_tokens", 0) or 0
+                )
+                self.values["completion_tokens"] += int(
+                    getattr(usage, "completion_tokens", 0) or 0
+                )
+
+    def record_logical_request(self, cache_hit: bool) -> None:
+        with self.lock:
+            self.values["llm_logical_requests"] += 1
+            if cache_hit:
+                self.values["llm_cache_hits"] += 1
 
     def set_values(self, **values: Any) -> None:
         with self.lock:
@@ -398,8 +447,11 @@ def default_metrics() -> dict[str, Any]:
         "llm_error_count": 0,
         "llm_latency_ms_total": 0,
         "llm_latency_ms_max": 0,
+        "llm_in_flight_wait_ms_total": 0,
         "prompt_tokens": 0,
         "completion_tokens": 0,
+        "source_page_reused": False,
+        "source_page_create_ms": 0,
         "layout_model_reused": False,
         "layout_model_load_ms": 0,
         "translator_reused": False,
@@ -407,6 +459,7 @@ def default_metrics() -> dict[str, Any]:
         "table_ocr_used": False,
         "table_model_reused": False,
         "table_model_load_ms": 0,
+        "job_cleanup_ms": 0,
     }
 
 
@@ -430,6 +483,10 @@ def source_text_path(document_id: str, page_number: int) -> Path:
     return document_dir(document_id) / "pages" / f"page-{page_number:04d}.txt"
 
 
+def source_page_pdf_path(document_id: str, page_number: int) -> Path:
+    return document_dir(document_id) / "source-pages" / f"page-{page_number:04d}.pdf"
+
+
 def translated_page_path(document_id: str, page_number: int) -> Path:
     return document_dir(document_id) / "translated-pages" / f"page-{page_number:04d}.pdf"
 
@@ -438,12 +495,114 @@ def translated_document_path(document_id: str) -> Path:
     return document_dir(document_id) / "translated.pdf"
 
 
+def timing_report_path(document_id: str, page_number: int) -> Path:
+    return document_dir(document_id) / "timings" / f"page-{page_number:04d}.json"
+
+
+def timing_attempt_path(document_id: str, page_number: int, attempt: int) -> Path:
+    return (
+        document_dir(document_id)
+        / "timings"
+        / f"page-{page_number:04d}-attempt-{attempt:04d}.json"
+    )
+
+
+def timing_summary_path(document_id: str) -> Path:
+    return document_dir(document_id) / "timings" / "summary.json"
+
+
+def atomic_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    temporary.replace(path)
+
+
 def save_document(record: dict[str, Any]) -> None:
     path = metadata_path(record["id"])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_json(path, record)
+
+
+def write_page_timing_report(record: dict[str, Any], page: dict[str, Any]) -> None:
+    metrics = page.get("metrics", default_metrics())
+    payload = {
+        "schema_version": 1,
+        "document_id": record["id"],
+        "filename": record["filename"],
+        "page_number": page["page_number"],
+        "attempt": int(page.get("attempt", 0)),
+        "status": page["status"],
+        "stage": page.get("stage"),
+        "stage_label": page.get("stage_label"),
+        "queued_at": page.get("queued_at"),
+        "started_at": page.get("started_at"),
+        "finished_at": page.get("finished_at"),
+        "updated_at": page.get("updated_at"),
+        "metrics": metrics,
+        "error": page.get("error"),
+    }
+    latest_path = timing_report_path(record["id"], page["page_number"])
+    atomic_write_json(latest_path, payload)
+    attempt = int(page.get("attempt", 0))
+    if attempt > 0:
+        atomic_write_json(
+            timing_attempt_path(record["id"], page["page_number"], attempt),
+            payload,
+        )
+
+
+def write_timing_summary(record: dict[str, Any]) -> None:
+    page_rows = []
+    for page in record.get("pages", []):
+        metrics = page.get("metrics", default_metrics())
+        page_rows.append(
+            {
+                "page_number": page["page_number"],
+                "attempt": int(page.get("attempt", 0)),
+                "status": page["status"],
+                "queue_wait_ms": metrics.get("queue_wait_ms", 0),
+                "total_ms": metrics.get("total_ms", 0),
+                "stage_durations_ms": metrics.get("stage_durations_ms", {}),
+                "llm_request_attempts": metrics.get("llm_request_attempts", 0),
+                "llm_latency_ms_total": metrics.get("llm_latency_ms_total", 0),
+                "llm_in_flight_wait_ms_total": metrics.get(
+                    "llm_in_flight_wait_ms_total", 0
+                ),
+                "llm_rate_limit_errors": metrics.get("llm_rate_limit_errors", 0),
+                "llm_cache_hits": metrics.get("llm_cache_hits", 0),
+            }
+        )
+    completed = [row for row in page_rows if row["total_ms"] > 0]
+    atomic_write_json(
+        timing_summary_path(record["id"]),
+        {
+            "schema_version": 1,
+            "document_id": record["id"],
+            "updated_at": utc_now(),
+            "completed_pages": len(completed),
+            "total_pages": record["page_count"],
+            "total_processing_ms": sum(row["total_ms"] for row in completed),
+            "total_queue_wait_ms": sum(row["queue_wait_ms"] for row in completed),
+            "total_llm_attempts": sum(
+                row["llm_request_attempts"] for row in completed
+            ),
+            "total_llm_latency_ms": sum(
+                row["llm_latency_ms_total"] for row in completed
+            ),
+            "total_llm_in_flight_wait_ms": sum(
+                row["llm_in_flight_wait_ms_total"] for row in completed
+            ),
+            "pages": page_rows,
+            "attempt_reports": sorted(
+                path.name
+                for path in (document_dir(record["id"]) / "timings").glob(
+                    "page-*-attempt-*.json"
+                )
+            ),
+        },
+    )
 
 
 def load_existing_documents() -> None:
@@ -490,7 +649,11 @@ def load_existing_documents() -> None:
                 page.setdefault("started_at", None)
                 page.setdefault("finished_at", None)
                 page.setdefault("priority", None)
-                page.setdefault("metrics", default_metrics())
+                page.setdefault("attempt", 0)
+                page["metrics"] = {
+                    **default_metrics(),
+                    **(page.get("metrics") or {}),
+                }
                 if "preflight" not in page:
                     text_path = source_text_path(record["id"], page["page_number"])
                     text = text_path.read_text(encoding="utf-8") if text_path.exists() else ""
@@ -525,11 +688,16 @@ def update_page(document_id: str, page_number: int, **updates: Any) -> None:
         page.update(updates)
         page["updated_at"] = utc_now()
         save_document(record)
+        if "metrics" in updates:
+            write_page_timing_report(record, page)
+            if page["status"] in {"ready", "error"}:
+                write_timing_summary(record)
 
 
 def page_summary(page: dict[str, Any]) -> dict[str, Any]:
     return {
         "page_number": page["page_number"],
+        "attempt": int(page.get("attempt", 0)),
         "status": page["status"],
         "error": page.get("error"),
         "updated_at": page.get("updated_at"),
@@ -615,9 +783,28 @@ def write_mock_page(document_id: str, page_number: int, output: Path) -> None:
         writer.write(stream)
 
 
-def instrument_translator(translator: Any, telemetry: PageTelemetry) -> None:
-    """Measure physical OpenAI attempts, including attempts hidden by retries."""
-    translator._transflow_telemetry = telemetry
+def ensure_source_page_pdf(document_id: str, page_number: int) -> tuple[Path, bool, int]:
+    """Materialize a one-page input once so every retry avoids the full source PDF."""
+    output = source_page_pdf_path(document_id, page_number)
+    if output.exists():
+        return output, True, 0
+    with SOURCE_PAGE_LOCK:
+        if output.exists():
+            return output, True, 0
+        started = time.monotonic()
+        reader = PdfReader(str(document_dir(document_id) / "source.pdf"))
+        writer = PdfWriter()
+        writer.add_page(reader.pages[page_number - 1])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_suffix(".tmp.pdf")
+        with temporary.open("wb") as stream:
+            writer.write(stream)
+        temporary.replace(output)
+        return output, False, round((time.monotonic() - started) * 1000)
+
+
+def instrument_translator(translator: Any) -> None:
+    """Measure shared-client attempts and enforce global upstream backpressure."""
     if getattr(translator, "_transflow_instrumented", False):
         return
     completions = getattr(getattr(translator, "client", None), "chat", None)
@@ -627,46 +814,132 @@ def instrument_translator(translator: Any, telemetry: PageTelemetry) -> None:
         return
 
     def measured_create(*args: Any, **kwargs: Any):
-        started = time.monotonic()
+        wait_started = time.monotonic()
+        wait_ms = 0
+        api_started = wait_started
         error: Exception | None = None
+        response: Any | None = None
+        context = getattr(TRANSLATOR_CALL_CONTEXT, "value", None)
+        if context is not None:
+            context["attempts"] += 1
         try:
-            return create(*args, **kwargs)
+            LLM_IN_FLIGHT.acquire()
+            wait_ms = round((time.monotonic() - wait_started) * 1000)
+            api_started = time.monotonic()
+            try:
+                response = create(*args, **kwargs)
+            finally:
+                LLM_IN_FLIGHT.release()
+            return response
         except Exception as exc:
             error = exc
+            if (
+                context is not None
+                and (
+                    exc.__class__.__name__ == "RateLimitError"
+                    or getattr(exc, "status_code", None) == 429
+                )
+                and context["attempts"] >= LLM_MAX_ATTEMPTS
+            ):
+                raise RuntimeError(
+                    f"OpenAI API 连续 {LLM_MAX_ATTEMPTS} 次限流，已停止本页，稍后可重试。"
+                ) from exc
             raise
         finally:
-            active_telemetry = getattr(translator, "_transflow_telemetry", None)
+            active_telemetry = context.get("telemetry") if context else None
             if active_telemetry:
                 active_telemetry.record_llm_attempt(
-                    round((time.monotonic() - started) * 1000), error
+                    round((time.monotonic() - api_started) * 1000),
+                    wait_ms,
+                    error,
+                    response,
                 )
 
     completions.create = measured_create
     translator._transflow_instrumented = True
 
 
-def translator_counters(translator: Any) -> dict[str, int]:
-    def atomic_value(name: str) -> int:
-        value = getattr(translator, name, 0)
-        return int(getattr(value, "value", value) or 0)
+class PageTranslatorProxy:
+    """Attach page-local metrics to one process-wide cached translator."""
 
-    return {
-        "llm_logical_requests": int(getattr(translator, "translate_call_count", 0) or 0),
-        "llm_cache_hits": int(getattr(translator, "translate_cache_call_count", 0) or 0),
-        "prompt_tokens": atomic_value("prompt_token_count"),
-        "completion_tokens": atomic_value("completion_token_count"),
-    }
+    def __init__(self, translator: Any, telemetry: PageTelemetry):
+        self._translator = translator
+        self._telemetry = telemetry
 
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._translator, name)
 
-def collect_translator_metrics(
-    translator: Any, telemetry: PageTelemetry, baseline: dict[str, int]
-) -> None:
-    current = translator_counters(translator)
-    telemetry.set_values(
-        **{
-            key: max(0, value - baseline.get(key, 0))
-            for key, value in current.items()
+    def _call(self, method_name: str, text: Any, *args: Any, **kwargs: Any) -> Any:
+        if text is None and method_name == "do_llm_translate":
+            return None
+        cache_hit = False
+        if text is not None and method_name in {"translate", "llm_translate"}:
+            try:
+                cache_hit = self._translator.cache.get(text) is not None
+            except Exception:
+                cache_hit = False
+            self._telemetry.record_logical_request(cache_hit)
+        previous = getattr(TRANSLATOR_CALL_CONTEXT, "value", None)
+        TRANSLATOR_CALL_CONTEXT.value = {
+            "telemetry": self._telemetry,
+            "attempts": 0,
         }
+        try:
+            return getattr(self._translator, method_name)(text, *args, **kwargs)
+        finally:
+            TRANSLATOR_CALL_CONTEXT.value = previous
+
+    def translate(self, text: Any, *args: Any, **kwargs: Any) -> Any:
+        return self._call("translate", text, *args, **kwargs)
+
+    def llm_translate(self, text: Any, *args: Any, **kwargs: Any) -> Any:
+        return self._call("llm_translate", text, *args, **kwargs)
+
+    def do_llm_translate(self, text: Any, *args: Any, **kwargs: Any) -> Any:
+        return self._call("do_llm_translate", text, *args, **kwargs)
+
+
+def build_translation_settings(
+    target_language: str, output_dir: Path, native_text: bool
+) -> Any:
+    from pdf2zh_next import BasicSettings
+    from pdf2zh_next import OpenAISettings
+    from pdf2zh_next import PDFSettings
+    from pdf2zh_next import SettingsModel
+    from pdf2zh_next import TranslationSettings
+
+    return SettingsModel(
+        basic=BasicSettings(debug=False),
+        translation=TranslationSettings(
+            lang_in=SOURCE_LANGUAGE,
+            lang_out=target_language_for_engine(target_language),
+            output=str(output_dir),
+            qps=LLM_QPS,
+            pool_max_workers=LLM_WORKERS,
+            term_qps=LLM_QPS,
+            term_pool_max_workers=LLM_WORKERS,
+            no_auto_extract_glossary=True,
+        ),
+        pdf=PDFSettings(
+            pages="1",
+            no_dual=True,
+            no_mono=False,
+            watermark_output_mode="no_watermark",
+            only_include_translated_page=True,
+            translate_table_text=TRANSLATE_TABLE_TEXT,
+            # Diagrams in academic PDFs are often vector lines plus text.
+            # Removing "non-formula" lines can erase the entire illustration.
+            no_remove_non_formula_lines=True,
+            skip_scanned_detection=native_text,
+        ),
+        translate_engine_settings=OpenAISettings(
+            openai_model=OPENAI_MODEL,
+            openai_base_url=OPENAI_BASE_URL,
+            openai_api_key=OPENAI_API_KEY,
+            openai_timeout=str(LLM_TIMEOUT_SECONDS),
+            openai_send_temprature=False,
+            openai_send_reasoning_effort=False,
+        ),
     )
 
 
@@ -678,11 +951,6 @@ async def run_pdfmathtranslate_async(
     telemetry: PageTelemetry,
 ) -> None:
     from babeldoc.format.pdf.high_level import async_translate as babeldoc_translate
-    from pdf2zh_next import BasicSettings
-    from pdf2zh_next import OpenAISettings
-    from pdf2zh_next import PDFSettings
-    from pdf2zh_next import SettingsModel
-    from pdf2zh_next import TranslationSettings
     from pdf2zh_next import create_babeldoc_config
 
     job_dir = document_dir(document_id) / "jobs" / f"page-{page_number:04d}"
@@ -690,37 +958,10 @@ async def run_pdfmathtranslate_async(
     record = get_record(document_id)
     page = get_page_record(record, page_number)
     preflight = page.get("preflight", {"native_text": False})
-    llm_qps = max(1, int(os.getenv("TRANSFLOW_LLM_QPS", "2")))
-    llm_workers = max(1, int(os.getenv("TRANSFLOW_LLM_WORKERS", "2")))
-    settings = SettingsModel(
-        basic=BasicSettings(debug=False),
-        translation=TranslationSettings(
-            lang_in=SOURCE_LANGUAGE,
-            lang_out=target_language_for_engine(target_language),
-            output=str(job_dir),
-            qps=llm_qps,
-            pool_max_workers=llm_workers,
-            term_qps=llm_qps,
-            term_pool_max_workers=llm_workers,
-            no_auto_extract_glossary=True,
-        ),
-        pdf=PDFSettings(
-            pages=str(page_number),
-            no_dual=True,
-            no_mono=False,
-            watermark_output_mode="no_watermark",
-            only_include_translated_page=True,
-            translate_table_text=False,
-            skip_scanned_detection=bool(preflight.get("native_text")),
-        ),
-        translate_engine_settings=OpenAISettings(
-            openai_model=OPENAI_MODEL,
-            openai_base_url=OPENAI_BASE_URL,
-            openai_api_key=OPENAI_API_KEY,
-            openai_timeout="180",
-            openai_send_temprature=False,
-            openai_send_reasoning_effort=False,
-        ),
+    settings = build_translation_settings(
+        target_language,
+        job_dir,
+        bool(preflight.get("native_text")),
     )
 
     update_page(
@@ -738,7 +979,9 @@ async def run_pdfmathtranslate_async(
         metrics=telemetry.transition("准备版面模型"),
         error=None,
     )
-    source_pdf = document_dir(document_id) / "source.pdf"
+    source_pdf, source_page_reused, source_page_create_ms = ensure_source_page_pdf(
+        document_id, page_number
+    )
     settings.validate_settings()
     layout_model, layout_reused, layout_load_ms = ENGINE_RUNTIME.get_layout_model()
     translator, translator_reused, translator_create_ms = ENGINE_RUNTIME.get_translator(
@@ -749,20 +992,27 @@ async def run_pdfmathtranslate_async(
         layout_model_load_ms=layout_load_ms,
         translator_reused=translator_reused,
         translator_create_ms=translator_create_ms,
+        source_page_reused=source_page_reused,
+        source_page_create_ms=source_page_create_ms,
     )
     # pdf2zh-next currently does not expose a layout model injection point.
     # Patch its factory only while building this serialized BabelDOC job.
     from babeldoc.docvision.doclayout import DocLayoutModel
     from unittest.mock import patch
 
-    with (
-        patch.object(DocLayoutModel, "load_available", return_value=layout_model),
-        patch("pdf2zh_next.high_level.get_translator", return_value=translator),
-    ):
-        babeldoc_config = create_babeldoc_config(settings, source_pdf)
-    babeldoc_config.table_model = LazyTableModel(telemetry)
-    instrument_translator(babeldoc_config.translator, telemetry)
-    translator_baseline = translator_counters(babeldoc_config.translator)
+    instrument_translator(translator)
+    # The factory patches process-global symbols; only this short setup section
+    # is serialized. Layout, LLM waiting and PDF generation run concurrently.
+    with BABELDOC_SETUP_LOCK:
+        with (
+            patch.object(DocLayoutModel, "load_available", return_value=layout_model),
+            patch("pdf2zh_next.high_level.get_translator", return_value=translator),
+        ):
+            babeldoc_config = create_babeldoc_config(settings, source_pdf)
+    babeldoc_config.translator = PageTranslatorProxy(translator, telemetry)
+    babeldoc_config.term_extraction_translator = babeldoc_config.translator
+    if TRANSLATE_TABLE_TEXT:
+        babeldoc_config.table_model = LazyTableModel(telemetry)
     update_page(
         document_id,
         page_number,
@@ -808,9 +1058,6 @@ async def run_pdfmathtranslate_async(
             if result.mono_pdf_path:
                 mono_pdf = Path(result.mono_pdf_path)
             break
-    collect_translator_metrics(
-        babeldoc_config.translator, telemetry, translator_baseline
-    )
     if not mono_pdf or not mono_pdf.exists():
         raise RuntimeError("PDFMathTranslate 未生成单语译文 PDF。")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -836,25 +1083,32 @@ async def run_pdfmathtranslate_async(
         temporary.unlink(missing_ok=True)
         raise RuntimeError("译文页面尺寸无效。")
     temporary.replace(output)
+    if not KEEP_JOB_FILES:
+        cleanup_started = time.monotonic()
+        shutil.rmtree(job_dir, ignore_errors=True)
+        telemetry.set_values(
+            job_cleanup_ms=round((time.monotonic() - cleanup_started) * 1000)
+        )
 
 
 def merge_translated_document(document_id: str) -> bool:
-    with LOCK:
-        record = get_record(document_id)
-        if not all(page["status"] == "ready" for page in record["pages"]):
-            return False
-    writer = PdfWriter()
-    for page_number in range(1, record["page_count"] + 1):
-        reader = PdfReader(str(translated_page_path(document_id, page_number)))
-        if len(reader.pages) != 1:
-            raise RuntimeError(f"第 {page_number} 页译文产物页数异常。")
-        writer.add_page(reader.pages[0])
-    output = translated_document_path(document_id)
-    temporary = output.with_suffix(".tmp.pdf")
-    with temporary.open("wb") as stream:
-        writer.write(stream)
-    temporary.replace(output)
-    return True
+    with MERGE_LOCK:
+        with LOCK:
+            record = get_record(document_id)
+            if not all(page["status"] == "ready" for page in record["pages"]):
+                return False
+        writer = PdfWriter()
+        for page_number in range(1, record["page_count"] + 1):
+            reader = PdfReader(str(translated_page_path(document_id, page_number)))
+            if len(reader.pages) != 1:
+                raise RuntimeError(f"第 {page_number} 页译文产物页数异常。")
+            writer.add_page(reader.pages[0])
+        output = translated_document_path(document_id)
+        temporary = output.with_suffix(".tmp.pdf")
+        with temporary.open("wb") as stream:
+            writer.write(stream)
+        temporary.replace(output)
+        return True
 
 
 def refresh_queue_metadata() -> None:
@@ -952,6 +1206,7 @@ def schedule_translation(
         page["queue_position"] = None
         page["queue_total"] = 0
         page["priority"] = priority
+        page["attempt"] = int(page.get("attempt", 0)) + 1
         page["queued_at"] = queued_at
         page["started_at"] = None
         page["finished_at"] = None
@@ -969,7 +1224,7 @@ def translate_worker(document_id: str, page_number: int) -> None:
     try:
         record = get_record(document_id)
         page = get_page_record(record, page_number)
-        telemetry = PageTelemetry(page.get("queued_at"))
+        telemetry = PageTelemetry(document_id, page_number, page.get("queued_at"))
         if LLM_MODE == "mock":
             mock_stages = [
                 ("preparing", "正在准备版面模型", 5),
@@ -1018,31 +1273,28 @@ def translate_worker(document_id: str, page_number: int) -> None:
         else:
             if not OPENAI_API_KEY:
                 raise RuntimeError("后端尚未配置 OPENAI_API_KEY。")
-            # BabelDOC owns native models and caches that are not safe to initialize
-            # concurrently. Its internal translation pool still issues LLM calls in parallel.
-            with BABELDOC_LOCK:
-                update_page(
+            update_page(
+                document_id,
+                page_number,
+                status="preparing",
+                stage="preparing",
+                stage_label="正在初始化翻译引擎",
+                progress=1,
+                started_at=utc_now(),
+                queue_position=None,
+                queue_total=0,
+                metrics=telemetry.transition("初始化翻译引擎"),
+                error=None,
+            )
+            asyncio.run(
+                run_pdfmathtranslate_async(
                     document_id,
                     page_number,
-                    status="preparing",
-                    stage="preparing",
-                    stage_label="正在初始化翻译引擎",
-                    progress=1,
-                    started_at=utc_now(),
-                    queue_position=None,
-                    queue_total=0,
-                    metrics=telemetry.transition("初始化翻译引擎"),
-                    error=None,
+                    record["target_language"],
+                    output,
+                    telemetry,
                 )
-                asyncio.run(
-                    run_pdfmathtranslate_async(
-                        document_id,
-                        page_number,
-                        record["target_language"],
-                        output,
-                        telemetry,
-                    )
-                )
+            )
         finished_at = utc_now()
         update_page(
             document_id,
@@ -1096,6 +1348,7 @@ def create_document(filename: str, target_language: str, body: bytes) -> dict[st
         if page_count < 1:
             raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "PDF_EMPTY", "PDF 中没有页面。")
         (directory / "pages").mkdir(parents=True, exist_ok=True)
+        (directory / "source-pages").mkdir(parents=True, exist_ok=True)
         pages: list[dict[str, Any]] = []
         for index, pdf_page in enumerate(reader.pages, start=1):
             try:
@@ -1103,6 +1356,15 @@ def create_document(filename: str, target_language: str, body: bytes) -> dict[st
             except Exception:
                 text = ""
             source_text_path(document_id, index).write_text(text, encoding="utf-8")
+            # Materialize only the initial window during upload. Remaining
+            # pages are split lazily when the user reaches them, which keeps
+            # large-document upload latency and disk amplification bounded.
+            if index <= PREFETCH_PAGES:
+                page_writer = PdfWriter()
+                page_writer.add_page(pdf_page)
+                page_output = source_page_pdf_path(document_id, index)
+                with page_output.open("wb") as stream:
+                    page_writer.write(stream)
             pages.append(
                 {
                     "page_number": index,
@@ -1115,6 +1377,7 @@ def create_document(filename: str, target_language: str, body: bytes) -> dict[st
                     "queue_position": None,
                     "queue_total": 0,
                     "priority": None,
+                    "attempt": 0,
                     "queued_at": None,
                     "started_at": None,
                     "finished_at": None,
@@ -1227,8 +1490,53 @@ class TransFlowHandler(BaseHTTPRequestHandler):
                             "workers": SCHEDULER.worker_count,
                             "queue_depth": len(SCHEDULER.snapshot()),
                         },
+                        "llm_runtime": {
+                            "qps": LLM_QPS,
+                            "workers_per_page": LLM_WORKERS,
+                            "max_in_flight": LLM_MAX_IN_FLIGHT,
+                            "max_attempts": LLM_MAX_ATTEMPTS,
+                            "timeout_seconds": LLM_TIMEOUT_SECONDS,
+                            "translate_table_text": TRANSLATE_TABLE_TEXT,
+                        },
                         "engine_runtime": ENGINE_RUNTIME.status(),
                     },
+                )
+                return
+
+            match = re.fullmatch(r"/api/v1/documents/([a-f0-9]+)/source\.pdf", path)
+            if match:
+                document_id = match.group(1)
+                record = get_record(document_id)
+                self.send_file(document_dir(document_id) / "source.pdf")
+                return
+
+            match = re.fullmatch(r"/api/v1/documents/([a-f0-9]+)/timings", path)
+            if match:
+                document_id = match.group(1)
+                record = get_record(document_id)
+                write_timing_summary(record)
+                self.send_json(
+                    HTTPStatus.OK,
+                    json.loads(timing_summary_path(document_id).read_text(encoding="utf-8")),
+                )
+                return
+
+            match = re.fullmatch(
+                r"/api/v1/documents/([a-f0-9]+)/pages/(\d+)/timing", path
+            )
+            if match:
+                document_id, page_raw = match.groups()
+                page_number = int(page_raw)
+                record = get_record(document_id)
+                page = get_page_record(record, page_number)
+                write_page_timing_report(record, page)
+                self.send_json(
+                    HTTPStatus.OK,
+                    json.loads(
+                        timing_report_path(document_id, page_number).read_text(
+                            encoding="utf-8"
+                        )
+                    ),
                 )
                 return
 
@@ -1393,6 +1701,18 @@ def main() -> None:
         print("正在预加载 DocLayout 模型...")
         _model, reused, load_ms = ENGINE_RUNTIME.get_layout_model()
         print(f"  DocLayout: {'reused' if reused else f'loaded in {load_ms} ms'}")
+        print("正在预加载默认中文 Translator...")
+        warm_settings = build_translation_settings(
+            "zh-CN", DATA_DIR / ".warmup", native_text=True
+        )
+        _translator, translator_reused, translator_ms = ENGINE_RUNTIME.get_translator(
+            warm_settings
+        )
+        instrument_translator(_translator)
+        print(
+            "  Translator: "
+            + ("reused" if translator_reused else f"loaded in {translator_ms} ms")
+        )
     print("TransFlow backend")
     print(f"  HTTP: http://{HOST}:{PORT}")
     print(f"  Engine: PDFMathTranslate/BabelDOC")

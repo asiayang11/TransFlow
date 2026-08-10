@@ -12,6 +12,7 @@ export type PageStatus =
 
 export interface PageSummary {
   page_number: number;
+  attempt: number;
   status: PageStatus;
   progress: number;
   stage: PageStatus;
@@ -34,8 +35,11 @@ export interface PageSummary {
     llm_error_count: number;
     llm_latency_ms_total: number;
     llm_latency_ms_max: number;
+    llm_in_flight_wait_ms_total: number;
     prompt_tokens: number;
     completion_tokens: number;
+    source_page_reused: boolean;
+    source_page_create_ms: number;
     layout_model_reused: boolean;
     layout_model_load_ms: number;
     translator_reused: boolean;
@@ -43,6 +47,7 @@ export interface PageSummary {
     table_ocr_used: boolean;
     table_model_reused: boolean;
     table_model_load_ms: number;
+    job_cleanup_ms: number;
   };
   preflight: {
     native_text: boolean;
@@ -81,6 +86,14 @@ export interface HealthRecord {
   scheduler: {
     workers: number;
     queue_depth: number;
+  };
+  llm_runtime: {
+    qps: number;
+    workers_per_page: number;
+    max_in_flight: number;
+    max_attempts: number;
+    timeout_seconds: number;
+    translate_table_text: boolean;
   };
   engine_runtime: {
     layout_model_ready: boolean;

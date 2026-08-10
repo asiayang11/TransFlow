@@ -51,6 +51,24 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Document" }
+  /api/v1/documents/{document_id}/source.pdf:
+    get:
+      summary: 获取任务原始 PDF，用于刷新后恢复预览
+      parameters:
+        - $ref: "#/components/parameters/DocumentId"
+      responses:
+        "200":
+          description: 原始 PDF
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+  /api/v1/documents/{document_id}/timings:
+    get:
+      summary: 获取逐页性能汇总
+      parameters:
+        - $ref: "#/components/parameters/DocumentId"
+      responses:
+        "200": { description: 页面阶段、LLM 与排队耗时汇总 }
   /api/v1/documents/{document_id}/pages/{page_number}:
     get:
       summary: 获取页面状态及译文 PDF 地址
@@ -76,6 +94,14 @@ paths:
             application/pdf:
               schema: { type: string, format: binary }
         "409": { description: 页面尚未翻译完成 }
+  /api/v1/documents/{document_id}/pages/{page_number}/timing:
+    get:
+      summary: 获取单页阶段耗时和 LLM 指标
+      parameters:
+        - $ref: "#/components/parameters/DocumentId"
+        - $ref: "#/components/parameters/PageNumber"
+      responses:
+        "200": { description: 单页性能报告 }
   /api/v1/documents/{document_id}/pages/{page_number}/translate:
     post:
       summary: 强制重新翻译一页
@@ -142,6 +168,16 @@ components:
             workers: { type: integer, minimum: 1 }
             queue_depth: { type: integer, minimum: 0 }
           required: [workers, queue_depth]
+        llm_runtime:
+          type: object
+          properties:
+            qps: { type: integer, minimum: 1 }
+            workers_per_page: { type: integer, minimum: 1 }
+            max_in_flight: { type: integer, minimum: 1 }
+            max_attempts: { type: integer, minimum: 1 }
+            timeout_seconds: { type: integer, minimum: 1 }
+            translate_table_text: { type: boolean }
+          required: [qps, workers_per_page, max_in_flight, max_attempts, timeout_seconds, translate_table_text]
         engine_runtime:
           type: object
           properties:
@@ -151,7 +187,7 @@ components:
             table_model_load_ms: { type: integer, minimum: 0 }
             translator_count: { type: integer, minimum: 0 }
           required: [layout_model_ready, layout_model_load_ms, table_model_ready, table_model_load_ms, translator_count]
-      required: [status, llm_mode, llm_configured, model, engine, base_url_configured, prefetch_pages, scheduler, engine_runtime]
+      required: [status, llm_mode, llm_configured, model, engine, base_url_configured, prefetch_pages, scheduler, llm_runtime, engine_runtime]
     PageMetrics:
       type: object
       properties:
@@ -167,8 +203,11 @@ components:
         llm_error_count: { type: integer, minimum: 0 }
         llm_latency_ms_total: { type: integer, minimum: 0 }
         llm_latency_ms_max: { type: integer, minimum: 0 }
+        llm_in_flight_wait_ms_total: { type: integer, minimum: 0 }
         prompt_tokens: { type: integer, minimum: 0 }
         completion_tokens: { type: integer, minimum: 0 }
+        source_page_reused: { type: boolean }
+        source_page_create_ms: { type: integer, minimum: 0 }
         layout_model_reused: { type: boolean }
         layout_model_load_ms: { type: integer, minimum: 0 }
         translator_reused: { type: boolean }
@@ -176,7 +215,8 @@ components:
         table_ocr_used: { type: boolean }
         table_model_reused: { type: boolean }
         table_model_load_ms: { type: integer, minimum: 0 }
-      required: [queue_wait_ms, total_ms, stage_durations_ms, llm_logical_requests, llm_cache_hits, llm_request_attempts, llm_rate_limit_errors, llm_error_count, llm_latency_ms_total, llm_latency_ms_max, prompt_tokens, completion_tokens, layout_model_reused, layout_model_load_ms, translator_reused, translator_create_ms, table_ocr_used, table_model_reused, table_model_load_ms]
+        job_cleanup_ms: { type: integer, minimum: 0 }
+      required: [queue_wait_ms, total_ms, stage_durations_ms, llm_logical_requests, llm_cache_hits, llm_request_attempts, llm_rate_limit_errors, llm_error_count, llm_latency_ms_total, llm_latency_ms_max, llm_in_flight_wait_ms_total, prompt_tokens, completion_tokens, source_page_reused, source_page_create_ms, layout_model_reused, layout_model_load_ms, translator_reused, translator_create_ms, table_ocr_used, table_model_reused, table_model_load_ms, job_cleanup_ms]
     PagePreflight:
       type: object
       properties:
@@ -187,6 +227,7 @@ components:
       type: object
       properties:
         page_number: { type: integer }
+        attempt: { type: integer, minimum: 0 }
         status: { enum: [pending, queued, preparing, analyzing, translating, typesetting, generating, validating, ready, error] }
         progress: { type: integer, minimum: 0, maximum: 100 }
         stage: { enum: [pending, queued, preparing, analyzing, translating, typesetting, generating, validating, ready, error] }
@@ -202,7 +243,7 @@ components:
         preflight: { $ref: "#/components/schemas/PagePreflight" }
         error: { type: [string, "null"] }
         updated_at: { type: [string, "null"] }
-      required: [page_number, status, progress, stage, stage_label, stage_current, stage_total, queue_position, queue_total, queued_at, started_at, finished_at, metrics, preflight, error, updated_at]
+      required: [page_number, attempt, status, progress, stage, stage_label, stage_current, stage_total, queue_position, queue_total, queued_at, started_at, finished_at, metrics, preflight, error, updated_at]
     Document:
       type: object
       properties:

@@ -6,12 +6,15 @@
 
 - 拖拽上传 PDF，校验格式、大小、加密状态和页数；
 - 上传后优先处理当前页，并在后台预取后续 4 页；切换页面会自动调整队列优先级；
+- 每个翻译任务有稳定 URL：`/tasks/{task_id}?page={page}`，刷新或复制链接后可恢复；
 - PDFMathTranslate/BabelDOC 保留插图、公式、表格和页面几何；
 - Ark/OpenAI-compatible `base_url`、`api_key`、`model` 配置；
 - 左右 PDF.js 同尺度逐页对照、页级状态与失败重试；
 - 每页展示真实处理进度和当前阶段，100% 后才加载译文 PDF；
 - DocLayout 与 OpenAI Client/Translator 进程级复用，RapidOCR 仅在页面检测到表格时按需加载；
-- 页级记录队列、各阶段、LLM 请求、缓存命中、429 与 Token 指标；
+- 原始 PDF 的首批缓存页在上传时预拆为单页输入，其余页面按需拆分；多页可并行等待 LLM，全局在途请求受控，429 重试有明确上限；
+- 服务启动时预热 DocLayout 和默认中文 Translator；表格 OCR 默认关闭，仅在 `TRANSFLOW_TRANSLATE_TABLE_TEXT=true` 时按需启用；
+- 页级记录队列、各阶段、LLM 请求、缓存命中、429 与 Token 指标；最新记录写入 `runtime/{task_id}/timings/page-xxxx.json`，每次执行另存 `page-xxxx-attempt-yyyy.json`，汇总写入 `summary.json`；
 - 逐页译文 PDF 缓存，全部完成后合并并提供下载；
 - 本地 HTTP API 与持久化元数据，契约见 `docs/openapi.yaml`。
 
@@ -39,6 +42,15 @@ cp .env.example .env
 OPENAI_API_KEY=你的密钥
 OPENAI_MODEL=你的模型或 Ark endpoint ID
 OPENAI_BASE_URL=https://你的-openai-compatible-host/v1
+
+# 性能与上游保护，可按模型配额调整
+TRANSFLOW_MAX_WORKERS=2
+TRANSFLOW_LLM_QPS=4
+TRANSFLOW_LLM_WORKERS=4
+TRANSFLOW_LLM_MAX_IN_FLIGHT=4
+TRANSFLOW_LLM_MAX_ATTEMPTS=3
+TRANSFLOW_LLM_TIMEOUT_SECONDS=120
+TRANSFLOW_TRANSLATE_TABLE_TEXT=false
 ```
 
 当前项目已验证 `OPENAI_BASE_URL=https://ark-cn-beijing.bytedance.net/api/v3` 的 `chat/completions` 链路。请求不会发送 `verbosity` 字段。
@@ -58,6 +70,8 @@ npm run dev
 ```
 
 打开 `http://127.0.0.1:5173`。第一次真实翻译会初始化本地模型和字体，后续任务会复用缓存。
+
+逐页性能数据也可通过 `GET /api/v1/documents/{task_id}/timings` 查询。若要保留 BabelDOC 中间文件用于故障排查，设置 `TRANSFLOW_KEEP_JOB_FILES=true`；默认成功后清理，避免 `runtime` 持续膨胀。
 
 ## 离线界面验证
 
