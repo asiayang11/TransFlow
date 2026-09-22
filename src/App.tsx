@@ -72,6 +72,9 @@ function taskUrl(documentId: string, page: number) {
 
 export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const navigationVersion = useRef(0);
+  const uploadingRef = useRef(false);
+  const selectionRef = useRef("");
   const [health, setHealth] = useState<HealthRecord | null>(null);
   const [targetLanguage, setTargetLanguage] = useState("zh-CN");
   const [documentRecord, setDocumentRecord] = useState<DocumentRecord | null>(null);
@@ -81,12 +84,14 @@ export default function App() {
   const [uploading, setUploading] = useState(false);
   const [restoringTask, setRestoringTask] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  selectionRef.current = `${documentRecord?.id ?? ""}:${currentPage}`;
 
   useEffect(() => {
     getHealth().then(setHealth).catch(() => setHealth(null));
   }, []);
 
   const restoreFromLocation = useCallback(async () => {
+    const version = ++navigationVersion.current;
     const task = locationTask();
     if (!task) {
       setDocumentRecord(null);
@@ -98,6 +103,7 @@ export default function App() {
     setError(null);
     try {
       const restored = await getDocument(task.documentId);
+      if (version !== navigationVersion.current) return;
       const restoredPage = Math.min(restored.page_count, task.page);
       setDocumentRecord(restored);
       setTargetLanguage(restored.target_language);
@@ -107,11 +113,12 @@ export default function App() {
         window.history.replaceState(null, "", taskUrl(restored.id, restoredPage));
       }
     } catch (restoreError) {
+      if (version !== navigationVersion.current) return;
       setDocumentRecord(null);
       setPageResult(null);
       setError(restoreError instanceof Error ? restoreError.message : "无法恢复翻译任务");
     } finally {
-      setRestoringTask(false);
+      if (version === navigationVersion.current) setRestoringTask(false);
     }
   }, []);
 
@@ -124,14 +131,17 @@ export default function App() {
 
   const refreshDocument = useCallback(async () => {
     if (!documentRecord) return;
+    const version = navigationVersion.current;
     const next = await getDocument(documentRecord.id);
-    setDocumentRecord(next);
+    if (version === navigationVersion.current && selectionRef.current.startsWith(`${documentRecord.id}:`)) setDocumentRecord(next);
   }, [documentRecord?.id]);
 
   const refreshPage = useCallback(async () => {
     if (!documentRecord) return;
+    const version = navigationVersion.current;
+    const selection = `${documentRecord.id}:${currentPage}`;
     const next = await getPage(documentRecord.id, currentPage);
-    setPageResult(next);
+    if (version === navigationVersion.current && selectionRef.current === selection) setPageResult(next);
   }, [documentRecord?.id, currentPage]);
 
   useEffect(() => {
@@ -142,8 +152,17 @@ export default function App() {
       taskUrl(documentRecord.id, currentPage),
     );
     setPageResult(null);
-    void prefetchPages(documentRecord.id, currentPage, documentRecord.prefetch_pages);
-    void refreshPage();
+    let cancelled = false;
+    const sync = async () => {
+      try {
+        await prefetchPages(documentRecord.id, currentPage, documentRecord.prefetch_pages);
+        if (!cancelled) await Promise.all([refreshDocument(), refreshPage()]);
+      } catch (syncError) {
+        if (!cancelled) setError(syncError instanceof Error ? syncError.message : "无法加载页面");
+      }
+    };
+    void sync();
+    return () => { cancelled = true; };
   }, [documentRecord?.id, currentPage]);
 
   useEffect(() => {
@@ -154,15 +173,29 @@ export default function App() {
     );
     if (!active && !currentActive) return;
 
-    const timer = window.setInterval(() => {
-      void refreshDocument();
-      void refreshPage();
-    }, 700);
-    return () => window.clearInterval(timer);
-  }, [documentRecord, pageResult?.status, refreshDocument, refreshPage]);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let failures = 0;
+    const poll = async () => {
+      try {
+        if (!document.hidden) await Promise.all([refreshDocument(), refreshPage()]);
+        failures = 0;
+      } catch {
+        failures += 1;
+      } finally {
+        if (!cancelled) timer = setTimeout(poll, Math.min(10000, 1000 * 2 ** failures));
+      }
+    };
+    timer = setTimeout(poll, 1000);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [documentRecord?.id, documentRecord?.pages.some((page) => ACTIVE_STATUSES.includes(page.status)), pageResult?.status, refreshDocument, refreshPage]);
 
   const handleFile = async (file?: File) => {
-    if (!file) return;
+    if (!file || uploadingRef.current) return;
+    if (file.size > 50 * 1024 * 1024) {
+      setError("PDF 最大支持 50 MB。");
+      return;
+    }
     if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
       setError("请拖入 PDF 文件。");
       return;
@@ -170,20 +203,27 @@ export default function App() {
 
     setError(null);
     setUploading(true);
+    uploadingRef.current = true;
+    const version = ++navigationVersion.current;
     try {
       const created = await uploadDocument(file, targetLanguage);
+      if (version !== navigationVersion.current) return;
       setDocumentRecord(created);
       setCurrentPage(1);
       setPageResult(null);
       window.history.pushState(null, "", taskUrl(created.id, 1));
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "上传失败");
+      if (version === navigationVersion.current) setError(uploadError instanceof Error ? uploadError.message : "上传失败");
     } finally {
+      uploadingRef.current = false;
       setUploading(false);
     }
   };
 
   const reset = () => {
+    navigationVersion.current += 1;
+    selectionRef.current = "";
+    setRestoringTask(false);
     setDocumentRecord(null);
     setPageResult(null);
     setCurrentPage(1);
@@ -209,7 +249,7 @@ export default function App() {
   );
 
   const currentSummary = documentRecord?.pages[currentPage - 1];
-  const visibleProgress = pageResult ?? currentSummary;
+  const visibleProgress = pageResult?.page_number === currentPage ? pageResult : currentSummary;
   const selectedLanguage = LANGUAGE_OPTIONS.find((item) => item.value === targetLanguage)?.label;
   const fileUrl = documentRecord
     ? `/api/v1/documents/${documentRecord.id}/source.pdf`
@@ -400,7 +440,7 @@ export default function App() {
 
               <article className="document-pane translation-pane">
                 <header><span>TRANSLATION</span><strong>{selectedLanguage}</strong></header>
-                {pageResult?.status === "ready" && pageResult.translated_pdf_url ? (
+                {pageResult?.page_number === currentPage && pageResult.status === "ready" && pageResult.translated_pdf_url ? (
                   <PdfCanvas
                     fileUrl={`${pageResult.translated_pdf_url}?v=${encodeURIComponent(pageResult.updated_at || "ready")}`}
                     pageNumber={1}
@@ -408,7 +448,7 @@ export default function App() {
                   />
                 ) : (
                   <div className="translation-page">
-                    {pageResult?.status === "error" ? (
+                    {pageResult?.page_number === currentPage && pageResult.status === "error" ? (
                     <div className="translation-message error-state">
                       <span>!</span>
                       <h3>这一页没有翻译成功</h3>
