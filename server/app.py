@@ -347,6 +347,7 @@ class PriorityTranslationScheduler:
         self.condition = threading.Condition()
         self.heap: list[tuple[int, int, str, int]] = []
         self.entries: dict[tuple[str, int], tuple[int, int]] = {}
+        self.active: set[tuple[str, int]] = set()
         self.sequence = 0
         self.stopped = False
         self.threads = [
@@ -363,6 +364,8 @@ class PriorityTranslationScheduler:
     def submit(self, document_id: str, page_number: int, priority: int) -> bool:
         key = (document_id, page_number)
         with self.condition:
+            if key in self.active:
+                return False
             existing = self.entries.get(key)
             if existing and priority >= existing[0]:
                 return False
@@ -419,8 +422,14 @@ class PriorityTranslationScheduler:
                 if self.entries.get(key) != (priority, version):
                     continue
                 del self.entries[key]
-            refresh_queue_metadata()
-            translate_worker(document_id, page_number)
+                self.active.add(key)
+            try:
+                refresh_queue_metadata()
+                translate_worker(document_id, page_number)
+            finally:
+                with self.condition:
+                    self.active.discard(key)
+                    self.condition.notify_all()
 
 
 class ApiError(Exception):
@@ -513,7 +522,7 @@ def timing_summary_path(document_id: str) -> Path:
 
 def atomic_write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
     temporary.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -1183,6 +1192,9 @@ def schedule_translation(
     with LOCK:
         record = get_record(document_id)
         page = get_page_record(record, page_number)
+        with SCHEDULER.condition:
+            if (document_id, page_number) in SCHEDULER.active:
+                return False
         if page["status"] == "queued":
             reprioritized = SCHEDULER.submit(document_id, page_number, priority)
             if reprioritized:
@@ -1213,7 +1225,7 @@ def schedule_translation(
         page["metrics"] = default_metrics()
         page["updated_at"] = queued_at
         save_document(record)
-    SCHEDULER.submit(document_id, page_number, priority)
+        SCHEDULER.submit(document_id, page_number, priority)
     refresh_queue_metadata()
     return True
 
@@ -1311,7 +1323,16 @@ def translate_worker(document_id: str, page_number: int) -> None:
             metrics=telemetry.finish("完成"),
             error=None,
         )
-        merge_translated_document(document_id)
+        try:
+            merge_translated_document(document_id)
+            with LOCK:
+                record["merge_error"] = None
+                save_document(record)
+        except Exception as merge_error:
+            # A document-level export failure must not invalidate a good page.
+            with LOCK:
+                record["merge_error"] = sanitize_error(merge_error)
+                save_document(record)
     except Exception as exc:  # Keep the executor alive and surface an actionable error.
         update_page(
             document_id,
@@ -1559,7 +1580,7 @@ class TransFlowHandler(BaseHTTPRequestHandler):
                         ),
                         "translated_pdf_url": (
                             f"/api/v1/documents/{document_id}/pages/{page_number}/translated.pdf"
-                            if page["status"] == "ready"
+                            if translated_page_path(document_id, page_number).exists()
                             else None
                         ),
                     }
@@ -1579,7 +1600,7 @@ class TransFlowHandler(BaseHTTPRequestHandler):
                 record = get_record(document_id)
                 page = get_page_record(record, page_number)
                 output = translated_page_path(document_id, page_number)
-                if page["status"] != "ready" or not output.exists():
+                if not output.exists():
                     raise ApiError(HTTPStatus.CONFLICT, "PAGE_NOT_READY", "该页译文尚未生成。")
                 self.send_file(output)
                 return
@@ -1670,16 +1691,18 @@ class TransFlowHandler(BaseHTTPRequestHandler):
             if match:
                 document_id, page_raw = match.groups()
                 page_number = int(page_raw)
-                translated_page_path(document_id, page_number).unlink(missing_ok=True)
-                translated_document_path(document_id).unlink(missing_ok=True)
-                schedule_translation(
+                scheduled = schedule_translation(
                     document_id,
                     page_number,
                     force=True,
                     priority=FOREGROUND_PRIORITY,
                 )
                 self.send_json(
-                    HTTPStatus.ACCEPTED, {"page_number": page_number, "status": "queued"}
+                    HTTPStatus.ACCEPTED, {
+                        "page_number": page_number,
+                        "status": get_page_record(get_record(document_id), page_number)["status"],
+                        "scheduled": scheduled,
+                    }
                 )
                 return
 
