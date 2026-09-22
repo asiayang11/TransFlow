@@ -26,6 +26,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from request_gate import RequestGate
 
 try:
     from pypdf import PdfReader, PdfWriter
@@ -92,10 +93,13 @@ LOCK = threading.RLock()
 BABELDOC_SETUP_LOCK = threading.Lock()
 MERGE_LOCK = threading.Lock()
 SOURCE_PAGE_LOCK = threading.Lock()
-LLM_IN_FLIGHT = threading.BoundedSemaphore(LLM_MAX_IN_FLIGHT)
 TRANSLATOR_CALL_CONTEXT = threading.local()
 DOCUMENTS: dict[str, dict[str, Any]] = {}
 VIEW_WINDOWS: dict[str, dict[str, tuple[float, int, set[int]]]] = {}
+LLM_IN_FLIGHT = RequestGate(
+    LLM_MAX_IN_FLIGHT, LLM_QPS,
+    lambda key: bool(key and key[1] in DOCUMENTS.get(key[0], {}).get("foreground_pages", [1])),
+)
 
 FOREGROUND_PRIORITY = 0
 PREFETCH_PRIORITY = 100
@@ -359,7 +363,9 @@ class PriorityTranslationScheduler:
                 name=f"transflow-priority-{index + 1}",
                 daemon=True,
             )
-            for index in range(worker_count)
+            # One bounded foreground overflow lane prevents long background
+            # pages from occupying every page worker. LLM limits stay global.
+            for index in range(worker_count + 1 if worker_count else 0)
         ]
         for thread in self.threads:
             thread.start()
@@ -423,6 +429,10 @@ class PriorityTranslationScheduler:
                 priority, version, document_id, page_number = heapq.heappop(self.heap)
                 key = (document_id, page_number)
                 if self.entries.get(key) != (priority, version):
+                    continue
+                if len(self.active) >= self.worker_count and priority != FOREGROUND_PRIORITY:
+                    heapq.heappush(self.heap, (priority, version, document_id, page_number))
+                    self.condition.wait()
                     continue
                 del self.entries[key]
                 self.active.add(key)
@@ -858,7 +868,9 @@ def instrument_translator(translator: Any) -> None:
         if context is not None:
             context["attempts"] += 1
         try:
-            LLM_IN_FLIGHT.acquire()
+            telemetry = context.get("telemetry") if context else None
+            key = (telemetry.document_id, telemetry.page_number) if telemetry else None
+            LLM_IN_FLIGHT.acquire(key, timeout=LLM_TIMEOUT_SECONDS)
             wait_ms = round((time.monotonic() - wait_started) * 1000)
             api_started = time.monotonic()
             try:

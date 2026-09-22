@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -122,6 +123,34 @@ class FileDeliveryTests(unittest.TestCase):
         result, body = self.request({"Range": "bytes=2-5", "If-Range": '"old"'})
         self.assertEqual(result["status"], 200)
         self.assertEqual(body, b"0123456789")
+
+
+class SchedulerCapacityTests(unittest.TestCase):
+    def test_foreground_can_start_while_background_lane_is_occupied(self):
+        background_started = threading.Event()
+        release_background = threading.Event()
+        foreground_started = threading.Event()
+        second_background_started = threading.Event()
+        def work(document_id, page):
+            if page == 2:
+                background_started.set()
+                release_background.wait(3)
+            elif page == 1:
+                foreground_started.set()
+            else:
+                second_background_started.set()
+        with patch.object(app, "translate_worker", side_effect=work), patch.object(app, "refresh_queue_metadata"):
+            scheduler = app.PriorityTranslationScheduler(1)
+            try:
+                scheduler.submit("task", 2, 100)
+                self.assertTrue(background_started.wait(1))
+                scheduler.submit("task", 3, 101)
+                scheduler.submit("task", 1, 0)
+                self.assertTrue(foreground_started.wait(1))
+                self.assertFalse(second_background_started.is_set())
+            finally:
+                release_background.set()
+                scheduler.shutdown()
 
 
 if __name__ == "__main__":
