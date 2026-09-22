@@ -391,7 +391,7 @@ export default function App() {
                   </span>
                   <span className={`page-progress-value status-${page.status}`}>
                     {page.status === "ready"
-                      ? "✓"
+                      ? page.quality?.status === "needs_review" ? "!" : "✓"
                       : page.status === "error"
                         ? "!"
                         : page.status === "queued" && page.queue_position
@@ -440,12 +440,24 @@ export default function App() {
 
               <article className="document-pane translation-pane">
                 <header><span>TRANSLATION</span><strong>{selectedLanguage}</strong></header>
-                {pageResult?.page_number === currentPage && pageResult.status === "ready" && pageResult.translated_pdf_url ? (
+                {visibleProgress?.quality?.status === "needs_review" && (
+                  <div className="inline-error" role="status">
+                    <strong>需复核（不代表翻译失败）</strong>
+                    {visibleProgress.quality.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+                  </div>
+                )}
+                {pageResult?.page_number === currentPage && pageResult.translated_pdf_url ? (
+                  <>
+                  {pageResult.status !== "ready" && <div className="inline-error" role="status">
+                    正在展示上次成功结果。{pageResult.status === "error" ? pageResult.error : pageResult.stage_label}
+                    {pageResult.status === "error" && <button onClick={() => void retryCurrent()}>重试</button>}
+                  </div>}
                   <PdfCanvas
-                    fileUrl={`${pageResult.translated_pdf_url}?v=${encodeURIComponent(pageResult.updated_at || "ready")}`}
+                    fileUrl={`${pageResult.translated_pdf_url}?v=${encodeURIComponent(pageResult.artifact_revision || "legacy")}`}
                     pageNumber={1}
                     loadingLabel="正在渲染译文 PDF 页"
                   />
+                  </>
                 ) : (
                   <div className="translation-page">
                     {pageResult?.page_number === currentPage && pageResult.status === "error" ? (

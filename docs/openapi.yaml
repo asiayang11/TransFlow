@@ -226,6 +226,15 @@ components:
     PageSummary:
       type: object
       properties:
+        artifact_revision: { type: [string, "null"], description: 上次成功发布的产物版本，重试期间不变 }
+        quality:
+          type: [object, "null"]
+          description: 结构检查与启发式告警，不代表语义质量验收；历史产物可能为空
+          properties:
+            status: { enum: [structural_checks_passed, needs_review] }
+            warnings: { type: array, items: { type: string } }
+            checks: { type: array, items: { type: string } }
+            semantic_accuracy_verified: { const: false }
         page_number: { type: integer }
         attempt: { type: integer, minimum: 0 }
         status: { enum: [pending, queued, preparing, analyzing, translating, typesetting, generating, validating, ready, error] }

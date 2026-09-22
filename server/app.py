@@ -15,6 +15,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -549,6 +551,8 @@ def write_page_timing_report(record: dict[str, Any], page: dict[str, Any]) -> No
         "started_at": page.get("started_at"),
         "finished_at": page.get("finished_at"),
         "updated_at": page.get("updated_at"),
+        "quality": page.get("quality"),
+        "artifact_revision": page.get("artifact_revision"),
         "metrics": metrics,
         "error": page.get("error"),
     }
@@ -722,6 +726,8 @@ def update_page(document_id: str, page_number: int, **updates: Any) -> None:
 
 def page_summary(page: dict[str, Any]) -> dict[str, Any]:
     return {
+        "quality": page.get("quality"),
+        "artifact_revision": page.get("artifact_revision"),
         "page_number": page["page_number"],
         "attempt": int(page.get("attempt", 0)),
         "status": page["status"],
@@ -1108,7 +1114,22 @@ async def run_pdfmathtranslate_async(
     if float(media_box.width) <= 0 or float(media_box.height) <= 0:
         temporary.unlink(missing_ok=True)
         raise RuntimeError("译文页面尺寸无效。")
+    checked = subprocess.run(
+        [sys.executable, str(ROOT / "server" / "pdf_quality.py"), str(source_pdf),
+         str(temporary), SOURCE_LANGUAGE, target_language],
+        capture_output=True, text=True, timeout=45,
+    )
+    try:
+        quality = json.loads(checked.stdout)
+    except ValueError as exc:
+        raise RuntimeError("译文质量检查未能完成，已保留上次成功结果。") from exc
+    if checked.returncode != 0:
+        raise RuntimeError(quality.get("error", "译文质量检查失败。"))
+    if telemetry.snapshot().get("llm_error_count", 0):
+        quality["warnings"].append("本页发生过模型请求错误，请复核翻译完整性。")
+        quality["status"] = "needs_review"
     temporary.replace(output)
+    update_page(document_id, page_number, quality=quality, artifact_revision=uuid.uuid4().hex)
     if not KEEP_JOB_FILES:
         cleanup_started = time.monotonic()
         shutil.rmtree(job_dir, ignore_errors=True)

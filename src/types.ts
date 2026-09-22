@@ -11,6 +11,13 @@ export type PageStatus =
   | "error";
 
 export interface PageSummary {
+  artifact_revision?: string;
+  quality?: {
+    status: "needs_review" | "structural_checks_passed";
+    warnings: string[];
+    checks: string[];
+    semantic_accuracy_verified: false;
+  } | null;
   page_number: number;
   attempt: number;
   status: PageStatus;
