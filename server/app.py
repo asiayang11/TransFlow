@@ -95,6 +95,7 @@ SOURCE_PAGE_LOCK = threading.Lock()
 LLM_IN_FLIGHT = threading.BoundedSemaphore(LLM_MAX_IN_FLIGHT)
 TRANSLATOR_CALL_CONTEXT = threading.local()
 DOCUMENTS: dict[str, dict[str, Any]] = {}
+VIEW_WINDOWS: dict[str, dict[str, tuple[float, int, set[int]]]] = {}
 
 FOREGROUND_PRIORITY = 0
 PREFETCH_PRIORITY = 100
@@ -761,6 +762,8 @@ def public_document(record: dict[str, Any]) -> dict[str, Any]:
         "created_at": record["created_at"],
         "prefetch_pages": PREFETCH_PAGES,
         "translated_pdf_ready": translated_document_path(record["id"]).exists(),
+        "translation_mode": record.get("translation_mode", "reading"),
+        "merge_error": record.get("merge_error"),
         "pages": [page_summary(page) for page in record["pages"]],
     }
 
@@ -1195,6 +1198,8 @@ def refresh_queue_metadata() -> None:
 
 
 def cancel_obsolete_prefetch(document_id: str, keep_pages: set[int]) -> list[int]:
+    if get_record(document_id).get("translation_mode") == "full":
+        return []
     cancelled = SCHEDULER.cancel_prefetch_except(document_id, keep_pages)
     if not cancelled:
         return []
@@ -1389,6 +1394,21 @@ def translate_worker(document_id: str, page_number: int) -> None:
 SCHEDULER = PriorityTranslationScheduler(SCHEDULER_WORKERS)
 
 
+def set_translation_mode(document_id: str, mode: str) -> list[int]:
+    if mode not in {"reading", "full"}:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "INVALID_MODE", "翻译模式必须为 reading 或 full。")
+    with LOCK:
+        record = get_record(document_id)
+        record["translation_mode"] = mode
+        save_document(record)
+    if mode == "reading":
+        keep = set(record.get("foreground_pages", [1]))
+        cancel_obsolete_prefetch(document_id, keep)
+        return []
+    return [number for number in range(1, record["page_count"] + 1)
+            if schedule_translation(document_id, number, priority=PREFETCH_PRIORITY + number)]
+
+
 def create_document(filename: str, target_language: str, body: bytes) -> dict[str, Any]:
     document_id = uuid.uuid4().hex
     directory = document_dir(document_id)
@@ -1466,6 +1486,8 @@ def create_document(filename: str, target_language: str, body: bytes) -> dict[st
         "status": "active",
         "created_at": utc_now(),
         "engine_version": ENGINE_VERSION,
+        "translation_mode": "reading",
+        "foreground_pages": [1],
         "pages": pages,
     }
     with LOCK:
@@ -1737,6 +1759,14 @@ class TransFlowHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.CREATED, public_document(record))
                 return
 
+            match = re.fullmatch(r"/api/v1/documents/([a-f0-9]+)/translation-mode", path)
+            if match:
+                payload = self.read_json()
+                mode = payload.get("mode")
+                scheduled = set_translation_mode(match.group(1), mode)
+                self.send_json(HTTPStatus.ACCEPTED, {"mode": mode, "scheduled_pages": scheduled})
+                return
+
             match = re.fullmatch(r"/api/v1/documents/([a-f0-9]+)/prefetch", path)
             if match:
                 document_id = match.group(1)
@@ -1755,7 +1785,16 @@ class TransFlowHandler(BaseHTTPRequestHandler):
                         min(record["page_count"], start_page + count - 1) + 1,
                     )
                 )
-                cancelled = cancel_obsolete_prefetch(document_id, window)
+                view_id = str(payload.get("view_id", "legacy"))[:80]
+                with LOCK:
+                    now = time.monotonic()
+                    views = VIEW_WINDOWS.setdefault(document_id, {})
+                    views = {key: value for key, value in views.items() if now - value[0] < 300}
+                    views[view_id] = (now, start_page, window)
+                    VIEW_WINDOWS[document_id] = views
+                    keep_pages = set().union(*(value[2] for value in views.values()))
+                    record["foreground_pages"] = sorted({value[1] for value in views.values()})
+                cancelled = cancel_obsolete_prefetch(document_id, keep_pages)
                 for offset, page_number in enumerate(sorted(window)):
                     priority = (
                         FOREGROUND_PRIORITY
@@ -1827,6 +1866,9 @@ def main() -> None:
     print(f"  API key: {'configured' if OPENAI_API_KEY else 'missing'}")
     print(f"  Base URL: {'configured' if OPENAI_BASE_URL else 'missing'}")
     server = ThreadingHTTPServer((HOST, PORT), TransFlowHandler)
+    for record in list(DOCUMENTS.values()):
+        if record.get("translation_mode") == "full":
+            set_translation_mode(record["id"], "full")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

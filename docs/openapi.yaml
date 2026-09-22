@@ -124,9 +124,26 @@ paths:
               properties:
                 start_page: { type: integer, minimum: 1 }
                 count: { type: integer, minimum: 1, maximum: 10, default: 5 }
+                view_id: { type: string, description: 标签页标识，不同阅读窗口不会互相取消预取 }
               required: [start_page]
       responses:
         "202": { description: 已加入队列 }
+  /api/v1/documents/{document_id}/translation-mode:
+    post:
+      summary: 开启全文翻译或回到按需阅读（已运行的页面不会中断）
+      parameters:
+        - $ref: "#/components/parameters/DocumentId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mode: { enum: [reading, full] }
+              required: [mode]
+      responses:
+        "202": { description: 模式及队列已更新 }
   /api/v1/documents/{document_id}/translated.pdf:
     get:
       summary: 下载合并后的整本译文 PDF
@@ -256,6 +273,8 @@ components:
     Document:
       type: object
       properties:
+        translation_mode: { enum: [reading, full] }
+        merge_error: { type: [string, "null"] }
         id: { type: string }
         filename: { type: string }
         size_bytes: { type: integer }

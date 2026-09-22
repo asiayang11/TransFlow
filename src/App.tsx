@@ -5,6 +5,7 @@ import {
   getHealth,
   getPage,
   prefetchPages,
+  setTranslationMode,
   translatePage,
   uploadDocument,
 } from "./api";
@@ -84,6 +85,7 @@ export default function App() {
   const [uploading, setUploading] = useState(false);
   const [restoringTask, setRestoringTask] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [changingMode, setChangingMode] = useState(false);
   selectionRef.current = `${documentRecord?.id ?? ""}:${currentPage}`;
 
   useEffect(() => {
@@ -243,6 +245,20 @@ export default function App() {
     }
   };
 
+  const toggleTranslationMode = async () => {
+    if (!documentRecord || changingMode) return;
+    const version = navigationVersion.current;
+    setChangingMode(true);
+    try {
+      await setTranslationMode(documentRecord.id, documentRecord.translation_mode === "full" ? "reading" : "full");
+      await refreshDocument();
+    } catch (modeError) {
+      if (version === navigationVersion.current) setError(modeError instanceof Error ? modeError.message : "切换模式失败");
+    } finally {
+      setChangingMode(false);
+    }
+  };
+
   const readyCount = useMemo(
     () => documentRecord?.pages.filter((page) => page.status === "ready").length ?? 0,
     [documentRecord],
@@ -276,6 +292,10 @@ export default function App() {
           )}
           {documentRecord && (
             <>
+              <button className="secondary-button" disabled={changingMode} onClick={() => void toggleTranslationMode()}>
+                {changingMode ? "正在调整队列…" : documentRecord.translation_mode === "full" ? "停止全文预取" : "翻译全文"}
+              </button>
+              {documentRecord.merge_error && <span role="alert" title={documentRecord.merge_error}>全文合并失败，单页仍可阅读</span>}
               {documentRecord.translated_pdf_ready && (
                 <a
                   className="secondary-button download-button"

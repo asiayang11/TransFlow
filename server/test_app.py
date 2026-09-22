@@ -64,6 +64,25 @@ class ReliabilityTests(unittest.TestCase):
         self.assertEqual(result["active_pages"], 1)
         self.assertEqual(result["page_latency_p95_ms"], 1200)
 
+    def test_full_mode_preserves_work_outside_reading_window(self):
+        self.record["pages"][0]["status"] = "pending"
+        self.assertEqual(app.set_translation_mode(self.record["id"], "full"), [1])
+        self.assertEqual(app.cancel_obsolete_prefetch(self.record["id"], set()), [])
+        self.assertEqual(len(self.scheduler.snapshot()), 1)
+
+    def test_reading_mode_cancels_queued_background_work(self):
+        self.record["pages"][0]["status"] = "pending"
+        self.record["foreground_pages"] = []
+        app.set_translation_mode(self.record["id"], "full")
+        app.set_translation_mode(self.record["id"], "reading")
+        self.assertEqual(self.scheduler.snapshot(), [])
+        self.assertEqual(self.record["pages"][0]["status"], "pending")
+
+    def test_invalid_mode_does_not_mutate_task(self):
+        with self.assertRaises(app.ApiError):
+            app.set_translation_mode(self.record["id"], "invalid")
+        self.assertNotIn("translation_mode", self.record)
+
 
 class FileDeliveryTests(unittest.TestCase):
     def request(self, headers):

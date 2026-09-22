@@ -65,6 +65,8 @@ export interface PageSummary {
 }
 
 export interface DocumentRecord {
+  translation_mode: "reading" | "full";
+  merge_error: string | null;
   id: string;
   filename: string;
   size_bytes: number;

@@ -16,6 +16,8 @@
 - 服务启动时预热 DocLayout 和默认中文 Translator；表格 OCR 默认关闭，仅在 `TRANSFLOW_TRANSLATE_TABLE_TEXT=true` 时按需启用；
 - 页级记录队列、各阶段、LLM 请求、缓存命中、429 与 Token 指标；最新记录写入 `runtime/{task_id}/timings/page-xxxx.json`，每次执行另存 `page-xxxx-attempt-yyyy.json`，汇总写入 `summary.json`；
 - 逐页译文 PDF 缓存，全部完成后合并并提供下载；
+- “翻译全文”会排入剩余页面，刷新及服务重启后可继续；“停止全文预取”取消排队中的后台页面，已运行页面继续完成；
+- 每个标签页具有独立阅读窗口，避免互相取消预取（闲置窗口在后续导航时按 5 分钟过期）；
 - 本地 HTTP API 与持久化元数据，契约见 `docs/openapi.yaml`。
 
 当前 MVP 只启用稳定的后端模型接入。网页端 ChatGPT 登录态没有官方、可跨站调用的浏览器 API，直接复用登录 Cookie 会受 CORS、安全策略和会话变更影响，因此未把该不可靠链路伪装成可用功能。

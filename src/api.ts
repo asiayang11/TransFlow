@@ -1,4 +1,5 @@
 import type { ApiErrorShape, DocumentRecord, HealthRecord, PageResult } from "./types";
+const viewId = crypto.randomUUID();
 
 async function parseResponse<T>(response: Response): Promise<T> {
   if (response.ok) return (await response.json()) as T;
@@ -57,8 +58,15 @@ export async function prefetchPages(
     await fetch(`/api/v1/documents/${documentId}/prefetch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ start_page: startPage, count }),
+      body: JSON.stringify({ start_page: startPage, count, view_id: viewId }),
     }),
   );
 }
 
+export async function setTranslationMode(documentId: string, mode: "reading" | "full"): Promise<void> {
+  await parseResponse(await fetch(`/api/v1/documents/${documentId}/translation-mode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  }));
+}
