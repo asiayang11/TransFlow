@@ -1,5 +1,6 @@
 """Offline regression checks; never load user tasks or call the model."""
 import importlib.util
+import io
 import os
 from pathlib import Path
 import tempfile
@@ -47,6 +48,46 @@ class ReliabilityTests(unittest.TestCase):
         with self.assertRaises(app.ApiError):
             app.schedule_translation(self.record["id"], 2, force=True)
         self.assertEqual(self.record["pages"][0]["status"], "ready")
+
+
+class FileDeliveryTests(unittest.TestCase):
+    def request(self, headers):
+        path = Path(_runtime.name) / "delivery.bin"
+        if not path.exists():
+            path.write_bytes(b"0123456789")
+        handler = object.__new__(app.TransFlowHandler)
+        handler.headers = headers
+        handler.wfile = io.BytesIO()
+        result = {}
+        handler.send_response = lambda status: result.update(status=status)
+        handler.send_header = lambda key, value: result.update({key: value})
+        handler.end_headers = lambda: None
+        handler.cors_headers = lambda: None
+        handler.send_file(path)
+        return result, handler.wfile.getvalue()
+
+    def test_range(self):
+        result, body = self.request({"Range": "bytes=2-5"})
+        self.assertEqual(result["status"], 206)
+        self.assertEqual(body, b"2345")
+        self.assertEqual(result["Content-Range"], "bytes 2-5/10")
+
+    def test_suffix_range(self):
+        self.assertEqual(self.request({"Range": "bytes=-3"})[1], b"789")
+
+    def test_invalid_range(self):
+        self.assertEqual(self.request({"Range": "bytes=20-"})[0]["status"], 416)
+
+    def test_cache_revalidation(self):
+        first, _ = self.request({})
+        result, body = self.request({"If-None-Match": first["ETag"]})
+        self.assertEqual(result["status"], 304)
+        self.assertEqual(body, b"")
+
+    def test_stale_if_range_returns_full_file(self):
+        result, body = self.request({"Range": "bytes=2-5", "If-Range": '"old"'})
+        self.assertEqual(result["status"], 200)
+        self.assertEqual(body, b"0123456789")
 
 
 if __name__ == "__main__":

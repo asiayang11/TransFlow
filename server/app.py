@@ -1464,17 +1464,62 @@ class TransFlowHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def send_file(self, path: Path, filename: str | None = None) -> None:
-        data = path.read_bytes()
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "application/pdf")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "private, max-age=31536000, immutable")
-        if filename:
-            quoted = urllib.parse.quote(filename)
-            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quoted}")
-        self.cors_headers()
-        self.end_headers()
-        self.wfile.write(data)
+        # Keep one open inode throughout the response even if a retry publishes
+        # a replacement. Never label mutable task URLs as immutable.
+        with path.open("rb") as stream:
+            stat = os.fstat(stream.fileno())
+            size = stat.st_size
+            etag = f'"{stat.st_ino:x}-{stat.st_mtime_ns:x}-{size:x}"'
+            if self.headers.get("If-None-Match") == etag:
+                self.send_response(HTTPStatus.NOT_MODIFIED)
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "private, no-cache")
+                self.cors_headers()
+                self.end_headers()
+                return
+            start, end = 0, size - 1
+            requested_range = self.headers.get("Range")
+            if self.headers.get("If-Range", etag) != etag:
+                requested_range = None
+            if requested_range:
+                match = re.fullmatch(r"bytes=(\d*)-(\d*)", requested_range)
+                valid = bool(match and any(match.groups()))
+                if valid:
+                    left, right = match.groups()
+                    if left:
+                        start = int(left)
+                        end = min(int(right), size - 1) if right else size - 1
+                    else:
+                        start = max(0, size - int(right))
+                    valid = 0 <= start <= end < size
+                if not valid:
+                    self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self.cors_headers()
+                    self.end_headers()
+                    return
+            self.send_response(HTTPStatus.PARTIAL_CONTENT if requested_range else HTTPStatus.OK)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Length", str(max(0, end - start + 1)))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "private, no-cache")
+            if requested_range:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            if filename:
+                quoted = urllib.parse.quote(filename)
+                self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quoted}")
+            self.cors_headers()
+            self.end_headers()
+            stream.seek(start)
+            remaining = end - start + 1
+            while remaining > 0:
+                chunk = stream.read(min(256 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
 
     def send_error_json(self, error: ApiError) -> None:
         self.send_json(error.status, {"error": {"code": error.code, "message": error.message}})

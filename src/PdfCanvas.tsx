@@ -21,21 +21,42 @@ export default function PdfCanvas({ fileUrl, pageNumber, loadingLabel }: PdfCanv
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [renderSize, setRenderSize] = useState<RenderSize | null>(null);
+  const documentRef = useRef<ReturnType<typeof pdfjsLib.getDocument> | null>(null);
+  const [hostWidth, setHostWidth] = useState(0);
+
+  useEffect(() => {
+    const task = pdfjsLib.getDocument(fileUrl);
+    documentRef.current = task;
+    // Rendering below reports errors; attach a handler during teardown too.
+    void task.promise.catch(() => undefined);
+    return () => {
+      documentRef.current = null;
+      void task.destroy();
+    };
+  }, [fileUrl]);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const observer = new ResizeObserver(() => setHostWidth(host.clientWidth));
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     let disposed = false;
     let renderTask: { cancel: () => void; promise: Promise<void> } | null = null;
-    let documentTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
+    const documentTask = documentRef.current;
     const host = hostRef.current;
     const canvas = canvasRef.current;
-    if (!host || !canvas) return;
+    if (!host || !canvas || !documentTask) return;
 
     const render = async () => {
       setLoading(true);
       setError(null);
       try {
-        documentTask = pdfjsLib.getDocument(fileUrl);
         const pdf = await documentTask.promise;
+        if (disposed) return;
         const page = await pdf.getPage(pageNumber);
         const baseViewport = page.getViewport({ scale: 1 });
         const availableWidth = Math.max(280, host.clientWidth - 32);
@@ -69,9 +90,8 @@ export default function PdfCanvas({ fileUrl, pageNumber, loadingLabel }: PdfCanv
     return () => {
       disposed = true;
       renderTask?.cancel();
-      void documentTask?.destroy();
     };
-  }, [fileUrl, pageNumber]);
+  }, [fileUrl, pageNumber, hostWidth]);
 
   return (
     <div className="pdf-canvas-host" ref={hostRef}>
