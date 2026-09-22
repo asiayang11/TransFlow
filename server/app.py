@@ -583,19 +583,36 @@ def write_timing_summary(record: dict[str, Any]) -> None:
                 "llm_cache_hits": metrics.get("llm_cache_hits", 0),
             }
         )
-    completed = [row for row in page_rows if row["total_ms"] > 0]
+    completed = [row for row in page_rows if row["status"] == "ready"]
+    terminal = [row for row in page_rows if row["status"] in {"ready", "error"}]
+    def percentile(values: list[int], fraction: float) -> int | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        return ordered[max(0, int(len(ordered) * fraction + 0.999999) - 1)]
+
+    latencies = [row["total_ms"] + row["queue_wait_ms"] for row in completed]
     atomic_write_json(
         timing_summary_path(record["id"]),
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "document_id": record["id"],
             "updated_at": utc_now(),
             "completed_pages": len(completed),
+            "failed_pages": sum(row["status"] == "error" for row in page_rows),
+            "active_pages": sum(row["status"] in ACTIVE_PAGE_STATUSES for row in page_rows),
+            "page_latency_p50_ms": percentile(latencies, 0.5),
+            "page_latency_p95_ms": percentile(latencies, 0.95),
+            "measurement_notes": {
+                "total_processing_ms": "Sum of successful page processing durations; not document wall time.",
+                "page_latency": "Queue wait plus processing, latest successful attempts only.",
+                "llm_request_attempts": "Instrumented SDK calls; SDK-internal retries may not be counted.",
+            },
             "total_pages": record["page_count"],
             "total_processing_ms": sum(row["total_ms"] for row in completed),
             "total_queue_wait_ms": sum(row["queue_wait_ms"] for row in completed),
             "total_llm_attempts": sum(
-                row["llm_request_attempts"] for row in completed
+                row["llm_request_attempts"] for row in terminal
             ),
             "total_llm_latency_ms": sum(
                 row["llm_latency_ms_total"] for row in completed

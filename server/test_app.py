@@ -1,6 +1,7 @@
 """Offline regression checks; never load user tasks or call the model."""
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -48,6 +49,20 @@ class ReliabilityTests(unittest.TestCase):
         with self.assertRaises(app.ApiError):
             app.schedule_translation(self.record["id"], 2, force=True)
         self.assertEqual(self.record["pages"][0]["status"], "ready")
+
+    def test_metrics_do_not_count_failed_or_running_pages_as_completed(self):
+        self.record["page_count"] = 3
+        self.record["pages"] = [
+            {"page_number": index, "status": status,
+             "metrics": {"total_ms": 1000, "queue_wait_ms": 200}}
+            for index, status in enumerate(["ready", "error", "translating"], 1)
+        ]
+        app.write_timing_summary(self.record)
+        result = json.loads(app.timing_summary_path(self.record["id"]).read_text())
+        self.assertEqual(result["completed_pages"], 1)
+        self.assertEqual(result["failed_pages"], 1)
+        self.assertEqual(result["active_pages"], 1)
+        self.assertEqual(result["page_latency_p95_ms"], 1200)
 
 
 class FileDeliveryTests(unittest.TestCase):
