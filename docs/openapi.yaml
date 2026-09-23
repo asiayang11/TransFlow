@@ -284,6 +284,7 @@ components:
         created_at: { type: string }
         prefetch_pages: { type: integer }
         translated_pdf_ready: { type: boolean }
+        translated_pdf_current: { type: boolean, description: 整本产物是否与当前所有页面版本一致 }
         pages:
           type: array
           items: { $ref: "#/components/schemas/PageSummary" }

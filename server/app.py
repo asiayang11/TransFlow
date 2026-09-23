@@ -772,6 +772,11 @@ def public_document(record: dict[str, Any]) -> dict[str, Any]:
         "created_at": record["created_at"],
         "prefetch_pages": PREFETCH_PAGES,
         "translated_pdf_ready": translated_document_path(record["id"]).exists(),
+        "translated_pdf_current": (
+            translated_document_path(record["id"]).exists()
+            and all(page["status"] == "ready" for page in record["pages"])
+            and record.get("merged_page_versions") == publication_versions(record)
+        ),
         "translation_mode": record.get("translation_mode", "reading"),
         "merge_error": record.get("merge_error"),
         "pages": [page_summary(page) for page in record["pages"]],
@@ -1144,7 +1149,7 @@ async def run_pdfmathtranslate_async(
         quality["warnings"].append("本页发生过模型请求错误，请复核翻译完整性。")
         quality["status"] = "needs_review"
     temporary.replace(output)
-    update_page(document_id, page_number, quality=quality, artifact_revision=uuid.uuid4().hex)
+    update_page(document_id, page_number, quality=quality)
     if not KEEP_JOB_FILES:
         cleanup_started = time.monotonic()
         shutil.rmtree(job_dir, ignore_errors=True)
@@ -1153,23 +1158,39 @@ async def run_pdfmathtranslate_async(
         )
 
 
+def publication_versions(record: dict[str, Any]) -> list[list[Any]]:
+    return [[page["page_number"], page.get("artifact_revision"), page.get("attempt", 0)]
+            for page in record["pages"]]
+
+
 def merge_translated_document(document_id: str) -> bool:
     with MERGE_LOCK:
         with LOCK:
             record = get_record(document_id)
             if not all(page["status"] == "ready" for page in record["pages"]):
                 return False
+            versions = publication_versions(record)
+            output = translated_document_path(document_id)
+            if output.exists() and record.get("merged_page_versions") == versions:
+                return True
         writer = PdfWriter()
         for page_number in range(1, record["page_count"] + 1):
             reader = PdfReader(str(translated_page_path(document_id, page_number)))
             if len(reader.pages) != 1:
                 raise RuntimeError(f"第 {page_number} 页译文产物页数异常。")
             writer.add_page(reader.pages[0])
-        output = translated_document_path(document_id)
         temporary = output.with_suffix(".tmp.pdf")
         with temporary.open("wb") as stream:
             writer.write(stream)
-        temporary.replace(output)
+        with LOCK:
+            if (versions != publication_versions(record)
+                    or not all(page["status"] == "ready" for page in record["pages"])):
+                temporary.unlink(missing_ok=True)
+                return False
+            temporary.replace(output)
+            record["merged_page_versions"] = versions
+            record["merge_error"] = None
+            save_document(record)
         return True
 
 
@@ -1369,6 +1390,7 @@ def translate_worker(document_id: str, page_number: int) -> None:
             status="ready",
             stage="ready",
             stage_label="翻译完成",
+            artifact_revision=uuid.uuid4().hex,
             progress=100,
             stage_current=1,
             stage_total=1,

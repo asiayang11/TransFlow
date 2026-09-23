@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 _runtime = tempfile.TemporaryDirectory(prefix="transflow-tests-")
 os.environ["TRANSFLOW_DATA_DIR"] = _runtime.name
@@ -83,6 +84,27 @@ class ReliabilityTests(unittest.TestCase):
         with self.assertRaises(app.ApiError):
             app.set_translation_mode(self.record["id"], "invalid")
         self.assertNotIn("translation_mode", self.record)
+
+    def test_merge_does_not_publish_if_page_restarts_during_merge(self):
+        output = app.translated_document_path(self.record["id"])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"previous complete revision")
+        def write(stream):
+            stream.write(b"mixed revision")
+            self.record["pages"][0]["status"] = "queued"
+        writer = SimpleNamespace(add_page=lambda page: None, write=write)
+        with patch.object(app, "PdfWriter", return_value=writer), patch.object(app, "PdfReader", return_value=SimpleNamespace(pages=[object()])):
+            self.assertFalse(app.merge_translated_document(self.record["id"]))
+        self.assertEqual(output.read_bytes(), b"previous complete revision")
+
+    def test_merge_skips_already_published_revision(self):
+        output = app.translated_document_path(self.record["id"])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"published")
+        self.record["merged_page_versions"] = app.publication_versions(self.record)
+        with patch.object(app, "PdfWriter") as writer:
+            self.assertTrue(app.merge_translated_document(self.record["id"]))
+            writer.assert_not_called()
 
 
 class FileDeliveryTests(unittest.TestCase):

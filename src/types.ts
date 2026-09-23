@@ -76,6 +76,7 @@ export interface DocumentRecord {
   created_at: string;
   prefetch_pages: number;
   translated_pdf_ready: boolean;
+  translated_pdf_current: boolean;
   pages: PageSummary[];
 }
 

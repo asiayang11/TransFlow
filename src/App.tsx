@@ -351,7 +351,7 @@ export default function App() {
                 <a
                   className="secondary-button download-button"
                   href={`/api/v1/documents/${documentRecord.id}/translated.pdf`}
-                >下载译文 PDF</a>
+                >{documentRecord.translated_pdf_current ? "下载译文 PDF" : "下载上次完整译文"}</a>
               )}
               <button className="secondary-button" onClick={reset}>翻译新文档</button>
             </>
