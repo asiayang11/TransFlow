@@ -243,6 +243,7 @@ components:
     PageSummary:
       type: object
       properties:
+        artifact_kind: { type: [string, "null"], enum: [source_copy, translation, null], description: 区分测试副本与真实译文 }
         artifact_revision: { type: [string, "null"], description: 上次成功发布的产物版本，重试期间不变 }
         quality:
           type: [object, "null"]
@@ -273,6 +274,7 @@ components:
     Document:
       type: object
       properties:
+        execution_mode: { enum: [openai, mock], description: 创建任务时使用的后端模式 }
         translation_mode: { enum: [reading, full] }
         merge_error: { type: [string, "null"] }
         id: { type: string }

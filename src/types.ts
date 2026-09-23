@@ -11,6 +11,7 @@ export type PageStatus =
   | "error";
 
 export interface PageSummary {
+  artifact_kind?: "source_copy" | "translation" | null;
   artifact_revision?: string;
   quality?: {
     status: "needs_review" | "structural_checks_passed";
@@ -65,6 +66,7 @@ export interface PageSummary {
 }
 
 export interface DocumentRecord {
+  execution_mode: "openai" | "mock";
   translation_mode: "reading" | "full";
   merge_error: string | null;
   id: string;

@@ -650,6 +650,7 @@ def load_existing_documents() -> None:
     for path in DATA_DIR.glob("*/metadata.json"):
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
+            record.setdefault("execution_mode", LLM_MODE)
             engine_changed = record.get("engine_version") != ENGINE_VERSION
             record["engine_version"] = ENGINE_VERSION
             if engine_changed:
@@ -674,10 +675,12 @@ def load_existing_documents() -> None:
                     page.update(
                         progress=100,
                         stage="ready",
-                        stage_label="翻译完成",
+                        stage_label=("测试副本已生成（未翻译）"
+                                     if record["execution_mode"] == "mock" else "翻译完成"),
                         stage_current=1,
                         stage_total=1,
                     )
+                    page.setdefault("artifact_kind", "source_copy" if record["execution_mode"] == "mock" else "translation")
                 else:
                     page.setdefault("progress", 0)
                     page.setdefault("stage", page["status"])
@@ -737,6 +740,7 @@ def update_page(document_id: str, page_number: int, **updates: Any) -> None:
 
 def page_summary(page: dict[str, Any]) -> dict[str, Any]:
     return {
+        "artifact_kind": page.get("artifact_kind"),
         "quality": page.get("quality"),
         "artifact_revision": page.get("artifact_revision"),
         "page_number": page["page_number"],
@@ -763,6 +767,7 @@ def page_summary(page: dict[str, Any]) -> dict[str, Any]:
 
 def public_document(record: dict[str, Any]) -> dict[str, Any]:
     return {
+        "execution_mode": record.get("execution_mode", LLM_MODE),
         "id": record["id"],
         "filename": record["filename"],
         "size_bytes": record["size_bytes"],
@@ -1315,12 +1320,12 @@ def translate_worker(document_id: str, page_number: int) -> None:
         telemetry = PageTelemetry(document_id, page_number, page.get("queued_at"))
         if LLM_MODE == "mock":
             mock_stages = [
-                ("preparing", "正在准备版面模型", 5),
-                ("analyzing", "正在识别页面版面", 28),
-                ("analyzing", "正在识别段落、公式与样式", 45),
-                ("translating", "正在翻译文本", 78),
-                ("typesetting", "正在重建译文版面", 89),
-                ("generating", "正在生成译文 PDF", 97),
+                ("preparing", "演示：准备测试副本", 5),
+                ("analyzing", "演示：分析页面状态", 28),
+                ("analyzing", "演示：模拟处理进度", 45),
+                ("translating", "演示：未调用翻译模型", 78),
+                ("typesetting", "演示：复制原文版式", 89),
+                ("generating", "演示：生成原文副本", 97),
             ]
             mock_stage_delay = max(
                 0.0, min(30.0, float(os.getenv("TRANSFLOW_MOCK_STAGE_DELAY", "0.12")))
@@ -1349,7 +1354,7 @@ def translate_worker(document_id: str, page_number: int) -> None:
                 page_number,
                 status="validating",
                 stage="validating",
-                stage_label="正在验证并发布译文页",
+                stage_label="正在验证测试副本",
                 progress=98,
                 stage_current=0,
                 stage_total=1,
@@ -1389,7 +1394,8 @@ def translate_worker(document_id: str, page_number: int) -> None:
             page_number,
             status="ready",
             stage="ready",
-            stage_label="翻译完成",
+            stage_label="测试副本已生成（未翻译）" if LLM_MODE == "mock" else "翻译完成",
+            artifact_kind="source_copy" if LLM_MODE == "mock" else "translation",
             artifact_revision=uuid.uuid4().hex,
             progress=100,
             stage_current=1,
@@ -1496,6 +1502,7 @@ def create_document(filename: str, target_language: str, body: bytes) -> dict[st
                     "finished_at": None,
                     "metrics": default_metrics(),
                     "preflight": page_preflight(text),
+                    "artifact_kind": None,
                     "error": None,
                     "updated_at": None,
                 }
@@ -1520,6 +1527,7 @@ def create_document(filename: str, target_language: str, body: bytes) -> dict[st
         "status": "active",
         "created_at": utc_now(),
         "engine_version": ENGINE_VERSION,
+        "execution_mode": LLM_MODE,
         "translation_mode": "reading",
         "foreground_pages": [1],
         "pages": pages,

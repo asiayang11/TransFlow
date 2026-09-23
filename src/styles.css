@@ -100,6 +100,7 @@ button { color: inherit; }
 .page-progress-value { justify-self: end; color: #7e857e; font-family: Manrope, sans-serif; font-size: 9px; font-weight: 700; }
 .page-progress-value.status-ready { color: #31805a; }
 .page-progress-value.status-error { color: #bb583a; }
+.demo-banner { padding: 12px 14px; margin: 12px; border: 1px solid #d9ae70; border-radius: 10px; background: #fff5e3; color: #764b17; font-size: 12px; line-height: 1.5; font-weight: 600; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #c5c8c3; }
 .status-dot.status-ready { background: #4a9870; }
 .status-dot.status-queued { background: #d4ad45; }

@@ -318,6 +318,9 @@ export default function App() {
   const queuedAt = visibleProgress?.queued_at ? Date.parse(visibleProgress.queued_at) : null;
   const elapsedSeconds = queuedAt === null ? null : Math.max(0, Math.floor((clockNow - queuedAt) / 1000));
   const selectedLanguage = LANGUAGE_OPTIONS.find((item) => item.value === targetLanguage)?.label;
+  const isDemoTask = documentRecord?.execution_mode === "mock";
+  const pageStageLabel = (page?: PageResult | DocumentRecord["pages"][number]) =>
+    isDemoTask && page?.status === "ready" ? "原文副本（未翻译）" : page?.stage_label;
   const fileUrl = documentRecord
     ? `/api/v1/documents/${documentRecord.id}/source.pdf`
     : null;
@@ -335,7 +338,7 @@ export default function App() {
             <span className={`model-state ${health.llm_configured ? "is-ready" : "is-warning"}`}>
               <i />
               {health.llm_mode === "mock"
-                ? "演示模型"
+                ? "演示模式 · 不翻译"
                 : health.llm_configured
                   ? health.model
                   : "等待 API Key"}
@@ -351,7 +354,7 @@ export default function App() {
                 <a
                   className="secondary-button download-button"
                   href={`/api/v1/documents/${documentRecord.id}/translated.pdf`}
-                >{documentRecord.translated_pdf_current ? "下载译文 PDF" : "下载上次完整译文"}</a>
+                >{isDemoTask ? "下载原文测试副本" : documentRecord.translated_pdf_current ? "下载译文 PDF" : "下载上次完整译文"}</a>
               )}
               <button className="secondary-button" onClick={reset}>翻译新文档</button>
             </>
@@ -361,10 +364,13 @@ export default function App() {
 
       {!documentRecord ? (
         <section className="upload-view">
+          {health?.llm_mode === "mock" && <div className="demo-banner" role="status">当前是流程演示环境：右侧会复制原文，不会调用翻译模型。</div>}
           <div className="hero-copy">
             <span className="eyebrow">PAGE-BY-PAGE TRANSLATION</span>
             <h1>让每一页，<br />都在语境里被理解。</h1>
-            <p>拖入 PDF。TransFlow 会优先翻译当前页并预取后续 4 页，用 PDFMathTranslate 重建译文页面，让原文与译文始终并排。</p>
+            <p>{health?.llm_mode === "mock"
+              ? "拖入 PDF 体验上传、任务和左右对照。右侧只显示原文副本。"
+              : "拖入 PDF。TransFlow 会优先翻译当前页并预取后续 4 页，用 PDFMathTranslate 重建译文页面，让原文与译文始终并排。"}</p>
           </div>
 
           <div className="upload-panel">
@@ -434,6 +440,7 @@ export default function App() {
       ) : (
         <section className="workspace-view">
           <aside className="page-rail">
+            {isDemoTask && <div className="demo-banner" role="status">这是测试任务。右侧是原文副本，未执行翻译；请在真实后端重新上传文档。</div>}
             <div className="document-meta">
               <span className="file-badge">PDF</span>
               <div>
@@ -442,7 +449,7 @@ export default function App() {
               </div>
             </div>
             <div className="cache-summary">
-              <div><strong>{readyCount}</strong><span>已缓存</span></div>
+              <div><strong>{readyCount}</strong><span>{isDemoTask ? "测试副本" : "已缓存"}</span></div>
               <div><strong>{documentRecord.page_count}</strong><span>总页数</span></div>
             </div>
             <div className="page-list" aria-label="页面列表">
@@ -455,14 +462,14 @@ export default function App() {
                   <span className="page-number">{String(page.page_number).padStart(2, "0")}</span>
                   <span className="page-progress-copy">
                     <span className="page-label">第 {page.page_number} 页</span>
-                    <span className="page-stage" title={page.stage_label}>{page.stage_label}</span>
+                    <span className="page-stage" title={pageStageLabel(page)}>{pageStageLabel(page)}</span>
                     <span className="page-progress-track" aria-hidden="true">
                       <i style={{ width: `${page.progress}%` }} />
                     </span>
                   </span>
                   <span className={`page-progress-value status-${page.status}`}>
                     {page.status === "ready"
-                      ? page.quality?.status === "needs_review" ? "!" : "✓"
+                      ? isDemoTask ? "副本" : page.quality?.status === "needs_review" ? "!" : "✓"
                       : page.status === "error"
                         ? "!"
                         : page.status === "queued" && page.queue_position
@@ -495,7 +502,7 @@ export default function App() {
               </div>
               <div className="toolbar-status">
                 <span className={`status-pill status-${currentSummary?.status || "pending"}`}>
-                  <i />{currentSummary?.stage_label || STATUS_LABEL[currentSummary?.status || "pending"]}
+                  <i />{pageStageLabel(currentSummary) || STATUS_LABEL[currentSummary?.status || "pending"]}
                 </span>
                 <span>目标：{selectedLanguage}</span>
               </div>
@@ -521,7 +528,7 @@ export default function App() {
               </article>
 
               <article className="document-pane translation-pane">
-                <header><span>TRANSLATION</span><strong>{selectedLanguage}</strong></header>
+                <header><span>{isDemoTask ? "TEST COPY · NOT TRANSLATED" : "TRANSLATION"}</span><strong>{isDemoTask ? "原文副本（未翻译）" : selectedLanguage}</strong></header>
                 {visibleProgress?.quality?.status === "needs_review" && (
                   <div className="inline-error" role="status">
                     <strong>需复核（不代表翻译失败）</strong>
@@ -539,7 +546,7 @@ export default function App() {
                     pageNumber={1}
                     displayPageNumber={currentPage}
                     zoom={zoom}
-                    loadingLabel="正在渲染译文 PDF 页"
+                    loadingLabel={isDemoTask ? "正在渲染原文测试副本" : "正在渲染译文 PDF 页"}
                   />
                   </>
                 ) : (
@@ -554,7 +561,7 @@ export default function App() {
                   ) : (
                     <div className="translation-message">
                       <div className="progress-percentage">{visibleProgress?.progress ?? 0}<small>%</small></div>
-                      <h3>{visibleProgress?.stage_label || "等待调度"}</h3>
+                      <h3>{pageStageLabel(visibleProgress) || "等待调度"}</h3>
                       {elapsedSeconds !== null && <small>本次已等待 {Math.floor(elapsedSeconds / 60)} 分 {elapsedSeconds % 60} 秒（含排队）</small>}
                       <p>
                         {visibleProgress?.status === "queued"

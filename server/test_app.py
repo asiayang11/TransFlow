@@ -39,6 +39,26 @@ class ReliabilityTests(unittest.TestCase):
         self.assertFalse(self.scheduler.submit(self.record["id"], 1, 0))
         self.assertEqual(self.scheduler.snapshot(), [])
 
+    def test_mock_result_is_labeled_as_source_copy(self):
+        source = app.document_dir(self.record["id"]) / "source.pdf"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        writer = app.PdfWriter()
+        writer.add_blank_page(width=595, height=842)
+        with source.open("wb") as stream:
+            writer.write(stream)
+        self.record["filename"] = "sample.pdf"
+        self.record["size_bytes"] = source.stat().st_size
+        self.record["created_at"] = app.utc_now()
+        self.record["status"] = "active"
+        self.record["execution_mode"] = "mock"
+        app.translate_worker(self.record["id"], 1)
+        page = app.page_summary(self.record["pages"][0])
+        self.assertEqual(page["status"], "ready")
+        self.assertEqual(page["artifact_kind"], "source_copy")
+        self.assertIn("未翻译", page["stage_label"])
+        self.assertEqual(page["metrics"]["llm_request_attempts"], 0)
+        self.assertEqual(app.public_document(self.record)["execution_mode"], "mock")
+
     def test_retry_preserves_published_artifact(self):
         output = app.translated_page_path(self.record["id"], 1)
         output.parent.mkdir(parents=True, exist_ok=True)
