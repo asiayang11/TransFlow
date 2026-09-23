@@ -81,6 +81,7 @@ npm run dev
 ## 离线界面验证
 
 自动回归测试：`.venv-babeldoc/bin/python -m unittest discover -s server -p 'test_*.py' -v`。
+前端构建与请求顺序测试：`npm run check`。实施记录和验收边界见 [优化验收记录](docs/optimization-acceptance.md)。
 测试使用隔离临时目录和 Mock，不加载用户任务、不调用模型。
 
 真实译文发布前会在独立进程中检查页数、尺寸/裁剪/旋转和可渲染性。
