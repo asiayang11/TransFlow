@@ -31,13 +31,13 @@ export async function uploadDocument(file: File, targetLanguage: string): Promis
   return parseResponse<DocumentRecord>(response);
 }
 
-export async function getDocument(documentId: string): Promise<DocumentRecord> {
-  return parseResponse<DocumentRecord>(await fetch(`/api/v1/documents/${documentId}`));
+export async function getDocument(documentId: string, signal?: AbortSignal): Promise<DocumentRecord> {
+  return parseResponse<DocumentRecord>(await fetch(`/api/v1/documents/${documentId}`, { signal }));
 }
 
-export async function getPage(documentId: string, page: number): Promise<PageResult> {
+export async function getPage(documentId: string, page: number, signal?: AbortSignal): Promise<PageResult> {
   return parseResponse<PageResult>(
-    await fetch(`/api/v1/documents/${documentId}/pages/${page}`),
+    await fetch(`/api/v1/documents/${documentId}/pages/${page}`, { signal }),
   );
 }
 

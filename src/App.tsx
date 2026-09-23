@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import PdfCanvas from "./PdfCanvas";
+import { LatestRequest } from "./latest-request";
 import {
   getDocument,
   getHealth,
@@ -74,6 +75,8 @@ function taskUrl(documentId: string, page: number) {
 export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const navigationVersion = useRef(0);
+  const documentRequest = useRef(new LatestRequest());
+  const pageRequest = useRef(new LatestRequest());
   const uploadingRef = useRef(false);
   const selectionRef = useRef("");
   const [health, setHealth] = useState<HealthRecord | null>(null);
@@ -118,11 +121,16 @@ export default function App() {
 
   const restoreFromLocation = useCallback(async () => {
     const version = ++navigationVersion.current;
+    documentRequest.current.cancel();
+    pageRequest.current.cancel();
+    setDocumentRecord(null);
+    setPageResult(null);
     const task = locationTask();
     if (!task) {
       setDocumentRecord(null);
       setPageResult(null);
       setCurrentPage(1);
+      setRestoringTask(false);
       return;
     }
     setRestoringTask(true);
@@ -152,22 +160,37 @@ export default function App() {
     void restoreFromLocation();
     const handlePopState = () => void restoreFromLocation();
     window.addEventListener("popstate", handlePopState);
-    return () => window.removeEventListener("popstate", handlePopState);
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+      navigationVersion.current += 1;
+      documentRequest.current.cancel();
+      pageRequest.current.cancel();
+    };
   }, [restoreFromLocation]);
 
   const refreshDocument = useCallback(async () => {
     if (!documentRecord) return;
     const version = navigationVersion.current;
-    const next = await getDocument(documentRecord.id);
-    if (version === navigationVersion.current && selectionRef.current.startsWith(`${documentRecord.id}:`)) setDocumentRecord(next);
+    const signal = documentRequest.current.start();
+    try {
+      const next = await getDocument(documentRecord.id, signal);
+      if (documentRequest.current.owns(signal) && version === navigationVersion.current && selectionRef.current.startsWith(`${documentRecord.id}:`)) setDocumentRecord(next);
+    } catch (requestError) {
+      if (!signal.aborted) throw requestError;
+    }
   }, [documentRecord?.id]);
 
   const refreshPage = useCallback(async () => {
     if (!documentRecord) return;
     const version = navigationVersion.current;
     const selection = `${documentRecord.id}:${currentPage}`;
-    const next = await getPage(documentRecord.id, currentPage);
-    if (version === navigationVersion.current && selectionRef.current === selection) setPageResult(next);
+    const signal = pageRequest.current.start();
+    try {
+      const next = await getPage(documentRecord.id, currentPage, signal);
+      if (pageRequest.current.owns(signal) && version === navigationVersion.current && selectionRef.current === selection) setPageResult(next);
+    } catch (requestError) {
+      if (!signal.aborted) throw requestError;
+    }
   }, [documentRecord?.id, currentPage]);
 
   useEffect(() => {
@@ -248,6 +271,8 @@ export default function App() {
 
   const reset = () => {
     navigationVersion.current += 1;
+    documentRequest.current.cancel();
+    pageRequest.current.cancel();
     selectionRef.current = "";
     setRestoringTask(false);
     setDocumentRecord(null);
