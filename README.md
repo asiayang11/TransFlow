@@ -10,6 +10,7 @@
 - PDFMathTranslate/BabelDOC 保留插图、公式、表格和页面几何；
 - Ark/OpenAI-compatible `base_url`、`api_key`、`model` 配置；
 - 左右 PDF.js 同尺度逐页对照、页级状态与失败重试；
+- 两侧同步缩放（适应宽度 / 1.5 / 2 / 3 倍），支持左右方向键翻页；等待页显示含排队的实际已用时间；
 - 每页展示真实处理进度和当前阶段，100% 后才加载译文 PDF；
 - DocLayout 与 OpenAI Client/Translator 进程级复用，RapidOCR 仅在页面检测到表格时按需加载；
 - 原始 PDF 的首批缓存页在上传时预拆为单页输入，其余页面按需拆分；多页可并行等待 LLM，全局在途请求受控，429 重试有明确上限；

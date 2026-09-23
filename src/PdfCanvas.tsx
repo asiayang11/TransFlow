@@ -8,6 +8,8 @@ interface PdfCanvasProps {
   fileUrl: string;
   pageNumber: number;
   loadingLabel?: string;
+  zoom?: number;
+  displayPageNumber?: number;
 }
 
 interface RenderSize {
@@ -15,7 +17,7 @@ interface RenderSize {
   height: number;
 }
 
-export default function PdfCanvas({ fileUrl, pageNumber, loadingLabel }: PdfCanvasProps) {
+export default function PdfCanvas({ fileUrl, pageNumber, loadingLabel, zoom = 1, displayPageNumber = pageNumber }: PdfCanvasProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -60,7 +62,7 @@ export default function PdfCanvas({ fileUrl, pageNumber, loadingLabel }: PdfCanv
         const page = await pdf.getPage(pageNumber);
         const baseViewport = page.getViewport({ scale: 1 });
         const availableWidth = Math.max(280, host.clientWidth - 32);
-        const scale = Math.min(1.7, availableWidth / baseViewport.width);
+        const scale = Math.min(4, availableWidth / baseViewport.width * zoom);
         const viewport = page.getViewport({ scale });
         const ratio = window.devicePixelRatio || 1;
         const context = canvas.getContext("2d");
@@ -91,7 +93,7 @@ export default function PdfCanvas({ fileUrl, pageNumber, loadingLabel }: PdfCanv
       disposed = true;
       renderTask?.cancel();
     };
-  }, [fileUrl, pageNumber, hostWidth]);
+  }, [fileUrl, pageNumber, hostWidth, zoom]);
 
   return (
     <div className="pdf-canvas-host" ref={hostRef}>
@@ -105,7 +107,7 @@ export default function PdfCanvas({ fileUrl, pageNumber, loadingLabel }: PdfCanv
         className="pdf-page-surface"
         style={renderSize ? { width: renderSize.width, height: renderSize.height } : undefined}
       >
-        <canvas ref={canvasRef} aria-label={`PDF 第 ${pageNumber} 页`} />
+        <canvas ref={canvasRef} aria-label={`PDF 第 ${displayPageNumber} 页`} />
       </div>
     </div>
   );

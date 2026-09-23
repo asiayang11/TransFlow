@@ -86,7 +86,31 @@ export default function App() {
   const [restoringTask, setRestoringTask] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [changingMode, setChangingMode] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [clockNow, setClockNow] = useState(Date.now());
   selectionRef.current = `${documentRecord?.id ?? ""}:${currentPage}`;
+
+  useEffect(() => {
+    if (!documentRecord) return;
+    const handleKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.isContentEditable || /INPUT|SELECT|TEXTAREA|BUTTON|A/.test(target.tagName)
+          || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+        event.preventDefault();
+        setCurrentPage((page) => Math.max(1, Math.min(documentRecord.page_count,
+          page + (event.key === "ArrowRight" ? 1 : -1))));
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [documentRecord?.id, documentRecord?.page_count]);
+
+  useEffect(() => {
+    if (!documentRecord?.pages.some((page) => ACTIVE_STATUSES.includes(page.status))) return;
+    const timer = setInterval(() => setClockNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [documentRecord?.pages.some((page) => ACTIVE_STATUSES.includes(page.status))]);
 
   useEffect(() => {
     getHealth().then(setHealth).catch(() => setHealth(null));
@@ -266,6 +290,8 @@ export default function App() {
 
   const currentSummary = documentRecord?.pages[currentPage - 1];
   const visibleProgress = pageResult?.page_number === currentPage ? pageResult : currentSummary;
+  const queuedAt = visibleProgress?.queued_at ? Date.parse(visibleProgress.queued_at) : null;
+  const elapsedSeconds = queuedAt === null ? null : Math.max(0, Math.floor((clockNow - queuedAt) / 1000));
   const selectedLanguage = LANGUAGE_OPTIONS.find((item) => item.value === targetLanguage)?.label;
   const fileUrl = documentRecord
     ? `/api/v1/documents/${documentRecord.id}/source.pdf`
@@ -450,11 +476,22 @@ export default function App() {
               </div>
             </div>
 
+            <div className="reader-options">
+              <label>同步缩放
+                <select aria-label="同步缩放" value={zoom} onChange={(event) => setZoom(Number(event.target.value))}>
+                  <option value={1}>适应宽度</option>
+                  <option value={1.5}>放大 1.5 倍</option>
+                  <option value={2}>放大 2 倍</option>
+                  <option value={3}>放大 3 倍</option>
+                </select>
+              </label>
+              <span>← → 键翻页 · 两侧保持相同缩放比例</span>
+            </div>
             <div className="comparison-grid">
               <article className="document-pane source-pane">
                 <header><span>ORIGINAL</span><strong>原文</strong></header>
                 {fileUrl && (
-                  <PdfCanvas fileUrl={fileUrl} pageNumber={currentPage} loadingLabel="正在渲染原文页" />
+                  <PdfCanvas fileUrl={fileUrl} pageNumber={currentPage} zoom={zoom} loadingLabel="正在渲染原文页" />
                 )}
               </article>
 
@@ -475,6 +512,8 @@ export default function App() {
                   <PdfCanvas
                     fileUrl={`${pageResult.translated_pdf_url}?v=${encodeURIComponent(pageResult.artifact_revision || "legacy")}`}
                     pageNumber={1}
+                    displayPageNumber={currentPage}
+                    zoom={zoom}
                     loadingLabel="正在渲染译文 PDF 页"
                   />
                   </>
@@ -491,10 +530,13 @@ export default function App() {
                     <div className="translation-message">
                       <div className="progress-percentage">{visibleProgress?.progress ?? 0}<small>%</small></div>
                       <h3>{visibleProgress?.stage_label || "等待调度"}</h3>
+                      {elapsedSeconds !== null && <small>本次已等待 {Math.floor(elapsedSeconds / 60)} 分 {elapsedSeconds % 60} 秒（含排队）</small>}
                       <p>
                         {visibleProgress?.status === "queued"
                           ? queueCopy(visibleProgress)
-                          : "PDFMathTranslate 正在保留插图和公式，并重建对应的译文页面。"}
+                          : visibleProgress?.stage === "translating"
+                            ? `正在等待模型处理文本；阶段进度不代表剩余时间。${visibleProgress.stage_total ? ` 已处理 ${visibleProgress.stage_current}/${visibleProgress.stage_total} 个阶段单元。` : ""}`
+                            : "PDFMathTranslate 正在保留插图和公式，并重建对应的译文页面。"}
                       </p>
                       <div
                         className="translation-progress-track"
