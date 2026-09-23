@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import PdfCanvas from "./PdfCanvas";
+import PdfCanvas from "./PdfPreview";
 import { LatestRequest } from "./latest-request";
 import {
   getDocument,

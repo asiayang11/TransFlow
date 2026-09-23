@@ -4,7 +4,7 @@ import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
-interface PdfCanvasProps {
+export interface PdfCanvasProps {
   fileUrl: string;
   pageNumber: number;
   loadingLabel?: string;
