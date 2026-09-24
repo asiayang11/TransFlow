@@ -1,102 +1,101 @@
-# TransFlow MVP
+# TransFlow
 
-拖入 PDF，后端通过 PDFMathTranslate/BabelDOC 做版面分析、文本翻译和 PDF 重建；前端使用 PDF.js 将原文页与译文页并排渲染。译文不是 HTML 覆盖层，而是真实 PDF 页面，因此插图、公式、页尺寸和文本坐标能够保持对应。
+本地运行的 PDF 翻译工作台：拖入 PDF，逐页查看原文与译文，并在翻译完成后下载译文 PDF。后端使用 [PDFMathTranslate-next（`pdf2zh-next`）](https://github.com/PDFMathTranslate-next/PDFMathTranslate-next) / BabelDOC 分析和重建页面；前端用 PDF.js 并排显示两份 PDF，而不是用 HTML 文本盖在原文上。
 
-## MVP 能力
+> 当前是个人使用的 MVP，不是托管服务。现有翻译链路调用 **OpenAI-compatible 文本接口**；它不会把页面图片传给多模态模型。版面重建和语义翻译是两件事，图文位置尽量对应不等于译文质量已得到保证。
 
-- 拖拽上传 PDF，校验格式、大小、加密状态和页数；
-- 上传后优先处理当前页，并在后台预取后续 4 页；切换页面会自动调整队列优先级；
-- 每个翻译任务有稳定 URL：`/tasks/{task_id}?page={page}`，刷新或复制链接后可恢复；
-- PDFMathTranslate/BabelDOC 保留插图、公式、表格和页面几何；
-- Ark/OpenAI-compatible `base_url`、`api_key`、`model` 配置；
-- 左右 PDF.js 同尺度逐页对照、页级状态与失败重试；
-- 两侧同步缩放（适应宽度 / 1.5 / 2 / 3 倍），支持左右方向键翻页；等待页显示含排队的实际已用时间；
-- 每页展示真实处理进度和当前阶段，100% 后才加载译文 PDF；
-- DocLayout 与 OpenAI Client/Translator 进程级复用，RapidOCR 仅在页面检测到表格时按需加载；
-- 原始 PDF 的首批缓存页在上传时预拆为单页输入，其余页面按需拆分；多页可并行等待 LLM，全局在途请求受控，429 重试有明确上限；
-- 服务启动时预热 DocLayout 和默认中文 Translator；表格 OCR 默认关闭，仅在 `TRANSFLOW_TRANSLATE_TABLE_TEXT=true` 时按需启用；
-- 页级记录队列、各阶段、LLM 请求、缓存命中、429 与 Token 指标；最新记录写入 `runtime/{task_id}/timings/page-xxxx.json`，每次执行另存 `page-xxxx-attempt-yyyy.json`，汇总写入 `summary.json`；
-- 逐页译文 PDF 缓存，全部完成后合并并提供下载；
-- “翻译全文”会排入剩余页面，刷新及服务重启后可继续；“停止全文预取”取消排队中的后台页面，已运行页面继续完成；
-- 每个标签页具有独立阅读窗口，避免互相取消预取（闲置窗口在后续导航时按 5 分钟过期）；
-- 模型请求排队优先服务当前阅读页，并按全局 QPS 平滑发出；等待超过 60 秒的后台请求会提升优先级以避免饿死。已发出的请求不会强行取消；
-- 页处理最多为 `TRANSFLOW_MAX_WORKERS + 1`：额外 1 个通道仅供优先页启动，模型在途请求仍受 `TRANSFLOW_LLM_MAX_IN_FLIGHT` 限制；
-- 本地 HTTP API 与持久化元数据，契约见 `docs/openapi.yaml`。
+## 已支持什么
 
-当前 MVP 只启用稳定的后端模型接入。网页端 ChatGPT 登录态没有官方、可跨站调用的浏览器 API，直接复用登录 Cookie 会受 CORS、安全策略和会话变更影响，因此未把该不可靠链路伪装成可用功能。
+| 能力 | 当前行为 |
+| --- | --- |
+| PDF 输入 | 拖拽或选择 PDF，单文件上限 50 MB；拒绝损坏、无页面或加密的文件。以可提取文本的英文 PDF 为主要适用对象。 |
+| 翻译语言 | 源语言默认英语，可用 `TRANSFLOW_SOURCE_LANGUAGE` 调整；页面可选简体中文、英语、日语、韩语、法语、德语、西班牙语作为目标语言。实际效果取决于模型和字体。 |
+| 逐页翻译 | 上传后优先处理第 1 页，默认预取前 5 页；翻页时提升当前页优先级，并预取随后页面。译文由 BabelDOC 输出为真实 PDF 页面。 |
+| 对照阅读 | 左右同页对照、同步缩放、方向键翻页；显示页级阶段、进度、排队位置和失败重试。完成前不把原文副本当作译文展示。 |
+| 任务恢复 | 每个任务有 `/tasks/{id}?page={页码}` 本地地址；刷新页面或重启后端后可读取已保存的任务与产物。 |
+| 全文与下载 | 点击「翻译全文」排入剩余页面；全部完成后下载合并译文 PDF。「停止全文预取」只撤销尚未开始的后台任务，不会中断已运行页面。 |
+| 质量提示 | 发布前检查 PDF 页数、几何信息、可渲染性和部分文本异常；可疑页面标为「需复核」，**不代表已完成语义校对**。重试期间保留上次成功的页面。 |
+| 性能记录 | `runtime/{task_id}/timings/` 保存页级阶段、排队、模型请求和缓存指标，供定位慢页；详见 [优化验收记录](docs/optimization-acceptance.md)。 |
+| HTTP API | 后端提供上传、状态、预取、重试、全文模式、PDF 下载和耗时查询；接口契约见 [OpenAPI](docs/openapi.yaml)。 |
 
-## 环境要求
+## 快速开始
 
-- Node.js 20+
-- Python 3.12（`pdf2zh-next` 要求 Python 3.10–3.13）
-- [uv](https://docs.astral.sh/uv/)（推荐）
-- macOS 首次运行约需下载 330 MB 的 BabelDOC 版面模型与字体
-
-## 首次安装
+已在 macOS + Node.js 20+ + Python 3.12 上开发验证；其他系统尚未做完整验收。建议安装 [uv](https://docs.astral.sh/uv/) 管理 Python 环境。首次运行需要联网安装依赖，以及下载 BabelDOC 所需的版面模型和字体；后续启动会复用本机缓存，但进程重启仍需重新将模型载入内存。
 
 ```bash
-npm install
+npm ci
 uv venv --python 3.12 .venv-babeldoc
 uv pip install --python .venv-babeldoc/bin/python -r server/requirements.txt
 cp .env.example .env
 ```
 
-编辑 `.env`：
+编辑 `.env`，至少填入模型服务的密钥、模型名和 API 根地址：
 
 ```dotenv
-OPENAI_API_KEY=你的密钥
-OPENAI_MODEL=你的模型或 Ark endpoint ID
-OPENAI_BASE_URL=https://你的-openai-compatible-host/v1
-
-# 性能与上游保护，可按模型配额调整
-TRANSFLOW_MAX_WORKERS=2
-TRANSFLOW_LLM_QPS=4
-TRANSFLOW_LLM_WORKERS=4
-TRANSFLOW_LLM_MAX_IN_FLIGHT=4
-TRANSFLOW_LLM_MAX_ATTEMPTS=3
-TRANSFLOW_LLM_TIMEOUT_SECONDS=120
-TRANSFLOW_TRANSLATE_TABLE_TEXT=false
+TRANSFLOW_LLM_MODE=openai
+OPENAI_API_KEY=你的_API_Key
+OPENAI_MODEL=你的模型名或 Endpoint_ID
+OPENAI_BASE_URL=https://你的兼容服务地址/v1
 ```
 
-当前项目已验证 `OPENAI_BASE_URL=https://ark-cn-beijing.bytedance.net/api/v3` 的 `chat/completions` 链路。请求不会发送 `verbosity` 字段。
+`OPENAI_BASE_URL` 应是兼容服务的 API 根地址，**不要**加 `/chat/completions`。例如已验证过 `https://ark-cn-beijing.bytedance.net/api/v3` 的 `chat/completions` 链路；使用其他服务时请按其文档填写根地址。后端不会发送 `verbosity` 字段。模型需要支持兼容的 Chat Completions 文本请求；仅“配置了 Key”不等于模型一定可用。不要提交 `.env` 或在客户端代码里填写密钥。
 
-## 启动
-
-后端：
+分别在两个终端启动：
 
 ```bash
 npm run backend
 ```
 
-前端（另一个终端）：
-
 ```bash
 npm run dev
 ```
 
-打开 `http://127.0.0.1:5173`。第一次真实翻译会初始化本地模型和字体，后续任务会复用缓存。
+打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。后端默认监听 `127.0.0.1:8787`；可用 `http://127.0.0.1:8787/api/v1/health` 查看服务状态。修改 `.env` 后需要重启后端。
 
-逐页性能数据也可通过 `GET /api/v1/documents/{task_id}/timings` 查询。若要保留 BabelDOC 中间文件用于故障排查，设置 `TRANSFLOW_KEEP_JOB_FILES=true`；默认成功后清理，避免 `runtime` 持续膨胀。
+使用流程：
 
-## 离线界面验证
+1. 在上传页选目标语言，把 PDF 拖入页面或点击选择文件。
+2. 原文可立即阅读；译文页按队列和阶段逐页生成，完成后自动显示在右侧。若页面提示「需复核」，请人工检查漏译、图表和公式。
+3. 翻页会预取附近页面。若需要整本译文，点击「翻译全文」，待全部页面完成后下载。保存任务 URL 可继续阅读。
 
-自动回归测试：`.venv-babeldoc/bin/python -m unittest discover -s server -p 'test_*.py' -v`。
-前端构建与请求顺序测试：`npm run check`。实施记录和验收边界见 [优化验收记录](docs/optimization-acceptance.md)。
-测试使用隔离临时目录和 Mock，不加载用户任务、不调用模型。
+模型请求可能产生费用；翻译所需的文本会发送到 `.env` 指定的模型服务商。原始 PDF、单页产物和任务记录保存在本机 `runtime/`，不会因为离开页面而自动删除。任务 URL **不是访问控制机制**；当前没有账户、权限或对外部署防护，请保持默认的本地监听地址。
 
-真实译文发布前会在独立进程中检查页数、尺寸/裁剪/旋转和可渲染性。
-疑似未翻译、文字缺失、异常字符、越界或过小字号会显示“需复核”，而非声称语义质量已经合格。
-重试期间保留上次成功产物，新的检查失败不会覆盖旧 PDF。
+## 配置与排障
 
-在 `.env` 中设置：
+| 配置 | 默认值 | 用途 |
+| --- | --- | --- |
+| `TRANSFLOW_SOURCE_LANGUAGE` | `en` | 源语言；当前页面没有自动识别或切换入口。 |
+| `TRANSFLOW_PREFETCH_PAGES` | `5` | 阅读窗口的预取页数，后端限制为 1–10。 |
+| `TRANSFLOW_MAX_WORKERS` | `2` | 并行处理页数；前台页可额外占用一个处理通道。 |
+| `TRANSFLOW_LLM_QPS` / `TRANSFLOW_LLM_MAX_IN_FLIGHT` | `4` / `4` | 全局请求节奏和最大在途请求数，应按模型配额调整。 |
+| `TRANSFLOW_LLM_MAX_ATTEMPTS` / `TRANSFLOW_LLM_TIMEOUT_SECONDS` | `3` / `120` | 模型请求重试次数和单次超时秒数。 |
+| `TRANSFLOW_TRANSLATE_TABLE_TEXT` | `false` | 开启后按需加载表格 OCR；默认关闭以缩短普通页面等待。 |
+| `TRANSFLOW_KEEP_JOB_FILES` | `false` | 保留 BabelDOC 中间文件以便排障；会增加磁盘占用。 |
+| `TRANSFLOW_DATA_DIR` | `runtime` | 本地任务与耗时记录目录。 |
 
-```dotenv
-TRANSFLOW_LLM_MODE=mock
+完整默认配置见 [.env.example](.env.example)。页级数据位于 `runtime/{task_id}/timings/page-xxxx.json`，单次执行记录位于 `page-xxxx-attempt-yyyy.json`，汇总位于 `summary.json`；也可调用 `GET /api/v1/documents/{task_id}/timings`。
+
+如果右侧仍是英文，先检查页面或 `/api/v1/health` 是否标为 `mock`：Mock 只复制原文，用来验证交互，**不会翻译**。切回 `TRANSFLOW_LLM_MODE=openai`、重启后端，并重新上传生成真实任务；已有 Mock 任务不会变成译文任务。若是真实任务但提示「需复核」，应检查该页内容和模型返回，不要把 PDF 结构检查当作翻译质量保证。
+
+本地无模型费用地验证页面流程，可在 `.env` 中设 `TRANSFLOW_LLM_MODE=mock`。测试命令：
+
+```bash
+npm run check
+.venv-babeldoc/bin/python -m unittest discover -s server -p 'test_*.py' -v
 ```
 
-Mock 模式会运行上传、队列、逐页 PDF 和整本合并流程，但译文页只是原页副本，不会调用模型。
-页面、任务状态和下载入口会明确标注“原文副本（未翻译）”；要获得译文，请使用 `.env` 中的真实模型模式重新上传。
+这些自动测试不调用真实模型；真实译文的语义质量仍需用目标 PDF 人工验收。
 
-## 许可说明
+## 尚未支持 / 后续方向
 
-本项目当前按个人自用 MVP 集成 `pdf2zh-next`（AGPL-3.0）。若未来对外提供网络服务或商业化，需要先完成依赖许可、源码提供义务和模型服务条款评审。
+- **多模态翻译内核**：将页面图像或区域裁剪与结构化文本一起输入视觉模型，建立可验证的逐段回填协议。目前只是版面模型 + 文本 LLM，不应宣传为多模态翻译。
+- **Markdown 导出**：原文/译文 Markdown、图片资源和公式的结构化导出；不计划直接从译文 PDF 反向提取为 Markdown。
+- **复杂文档质量**：扫描件的可靠 OCR 路由、表格与图中文字翻译、跨页上下文与术语表、图表/公式语义校验及视觉回归。
+- **产品化体验**：任务列表与删除、文本搜索/选择、持久化暂停、更完整的浏览器自动化测试和冷/热启动性能基准。
+- **外部集成**：稳定的翻译能力接口及平台连接器（如闲鱼），在权限、数据隔离和配额机制完善后再开放。
+
+不会通过读取 ChatGPT 网页 Cookie 或模拟其私有接口来复用网页订阅。未来若提供用户自带模型能力，也应基于正式 API 凭证和明确的费用/隐私边界。更多产品设想见 [PRD v0.2](docs/PRD-v0.2.md)，其中的规划项**不代表已经实现**。
+
+## License
+
+TransFlow 自身代码采用 [GNU Affero General Public License v3.0](LICENSE)（`AGPL-3.0-only`）。上游 `pdf2zh-next==2.8.2` 也标注为 [AGPL-3.0](https://pypi.org/project/pdf2zh-next/2.8.2/)；其他依赖仍保留各自的许可证。AGPL 不是“仅限非商业使用”许可证。若未来向他人分发或提供网络服务，应遵守适用的源码提供等义务，并核对模型服务条款。
