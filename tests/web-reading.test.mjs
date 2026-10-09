@@ -40,6 +40,14 @@ test('workbench persists semantic reading, fits desktop, inspects and retries on
  const source=()=>page.locator('.web-source iframe').contentFrame(),target=()=>page.locator('.web-target iframe').contentFrame();
  assert.equal(await session().page.evaluate(()=>innerWidth),1280);
  assert.equal(await page.locator('.mirror-root').first().evaluate(node=>node.style.zoom),'0.5');
+ const readingSession=session().id;
+ await page.getByRole('button',{name:'全屏阅读',exact:true}).click();
+ assert.equal(await page.locator('.web-live-shell').evaluate(node=>node.classList.contains('is-fullscreen-reading')),true);
+ assert.equal(await page.getByRole('button',{name:'退出全屏',exact:true}).isVisible(),true);
+ await source().locator('summary').press('Escape');
+ await until(()=>page.locator('.web-live-shell').evaluate(node=>!node.classList.contains('is-fullscreen-reading')));
+ assert.equal(session().id,readingSession,'fullscreen toggles preserve the browser session');
+ assert.equal(await page.evaluate(()=>document.body.style.overflow),'');
  await page.getByRole('button',{name:'适应宽度',exact:true}).click();await until(()=>page.locator('.mirror-root').first().evaluate(node=>node.style.zoom==='1'));
  await page.locator('.mirror-host').first().evaluate(node=>node.scrollLeft=300);
  await until(()=>page.locator('.mirror-host').last().evaluate(node=>node.scrollLeft===300));

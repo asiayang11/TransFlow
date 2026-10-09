@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowCounterClockwise, ArrowLeft, ArrowRight, ArrowsClockwise, GlobeHemisphereWest, LinkSimple, LinkSimpleBreak, Minus, Plus } from '@phosphor-icons/react';
+import { ArrowCounterClockwise, ArrowLeft, ArrowRight, ArrowsClockwise, ArrowsOut, ArrowsIn, GlobeHemisphereWest, LinkSimple, LinkSimpleBreak, Minus, Plus } from '@phosphor-icons/react';
 import AppHeader from './AppHeader';
 import { AppLink } from './navigation';
 import { WebMirror, type WebCommand, type WebStatus, type ParagraphInspection } from './web-mirror';
@@ -33,6 +33,21 @@ export default function WebWorkspace() {
   const [inspection, setInspection] = useState<ParagraphInspection|null>(null);
   const [inspectMode, setInspectMode] = useState(false);
   const [readingNote, setReadingNote] = useState('');
+  const [fullscreen, setFullscreen] = useState(false);
+  const [showNotices, setShowNotices] = useState(false);
+  const fullscreenRef = useRef(fullscreen); fullscreenRef.current = fullscreen;
+  const fullscreenButton = useRef<HTMLButtonElement>(null);
+  const exitReading = () => {
+    if(!fullscreenRef.current)return false;
+    setFullscreen(false);setShowNotices(false);fullscreenButton.current?.focus();return true;
+  };
+  useEffect(()=>{
+    if(!fullscreen)return;
+    const previous=document.body.style.overflow;document.body.style.overflow='hidden';
+    const escape=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.preventDefault();exitReading();}};
+    window.addEventListener('keydown',escape);
+    return()=>{document.body.style.overflow=previous;window.removeEventListener('keydown',escape);};
+  },[fullscreen]);
   const view = useRef({mode,fit,zoom,scale}); view.current = {mode,fit,zoom,scale};
   const applyLayout = useRef<(() => void)|null>(null);
   const restoring = useRef<ReadingPosition|null>(null);
@@ -78,7 +93,7 @@ export default function WebWorkspace() {
   useEffect(() => {
     if (!sessionId || !roots.current[0] || !roots.current[1]) return;
     activeId.current = sessionId;
-    const instance = new WebMirror(roots.current as HTMLDivElement[], sendCommand, bumpZoom, () => { setRenderBroken(true); setError('网页部分结构无法还原，请重新打开网址或尝试其他网页。'); }, {inspect:setInspection,interacted:()=>{if(restoring.current){restoring.current=null;setReadingNote('已继续阅读，位置会自动保存。');}}});
+    const instance = new WebMirror(roots.current as HTMLDivElement[], sendCommand, bumpZoom, () => { setRenderBroken(true); setError('网页部分结构无法还原，请重新打开网址或尝试其他网页。'); }, {inspect:setInspection,escape:exitReading,interacted:()=>{if(restoring.current){restoring.current=null;setReadingNote('已继续阅读，位置会自动保存。');}}});
     mirror.current = instance; instance.inspectMode=inspectMode; instance.setLanguage(languageRef.current); instance.setLinked(linkedRef.current);
     let stream: EventSource;
     let restorationStarted=0; let matchedRestore=false; let latestStatus:WebStatus|null=null;
@@ -181,10 +196,12 @@ export default function WebWorkspace() {
   const navigation = (action: string) => {persist();restoring.current=null;setInspection(null);setError(''); dirty.current = false; sendCommand({ type: 'navigate', action }); };
   const summary = !sessionId ? '等待打开网页' : !connected ? '连接恢复中…' : status?.loading ? '正在加载网页…' : status?.translating ? `正在翻译 · ${status.completed} / ${status.total} 段${status.failed ? ` · ${status.failed} 段未完成` : ''}` : status?.translationError ? `已翻译 ${status.completed} / ${status.total} 段 · 部分未完成` : status?.total ? `已翻译 ${status.completed} / ${status.total} 段` : status?.metrics.captureMs != null ? '当前页面没有可翻译文字' : '正在识别网页文本…';
   const shownError = error || status?.error || '';
+  const noticeCount = Number(!!shownError)+Number(offline)+Number(!!status?.translationError)+Number(!!sessionId&&!connected)+Number(!!status?.resourceFailures);
 
-  return <main className="app-shell web-demo-shell web-live-shell">
+  return <main className={`app-shell web-demo-shell web-live-shell ${fullscreen?'is-fullscreen-reading':''}`}>
     <AppHeader active="web" />
     <div className="web-workspace">
+      {fullscreen&&<div className="fullscreen-reading-bar"><strong title={status?.url||url}>{status?.url||url||'网页对照阅读'}</strong><span role="status">{opening?'正在创建会话…':summary}</span>{noticeCount>0&&<button className="reading-tool" aria-expanded={showNotices} aria-controls="web-notices" onClick={()=>setShowNotices(value=>!value)}>{noticeCount} 项提示</button>}<small>Esc 退出</small></div>}
       <div className="web-page-heading"><div><AppLink href="/" className="back-link"><ArrowLeft size={15} />返回首页</AppLink><h1>一个网页，两种语言。</h1><p>保留原站排版，从任意一侧继续浏览。</p></div><span className="web-status" role="status">{opening ? '正在创建会话…' : summary}</span></div>
       <section className="web-controls" aria-label="网页配置">
         <form onSubmit={submit} noValidate className="url-form">
@@ -195,15 +212,18 @@ export default function WebWorkspace() {
         {shownError && <div className="url-error web-recovery" id="url-error" role="alert"><span>{shownError}</span>{sessionId && <button onClick={() => navigation('reload')}>重新载入网页</button>}</div>}
         <div className="sample-picker"><span>试试公开网页</span>{examples.map(([label, address]) => <button key={label} disabled={opening} onClick={() => void open(address)}>{label}</button>)}<span id="web-scope" className="demo-scope">支持公开文章、文档和产品页</span></div>
       </section>
+      <div id="web-notices" className={`web-notices ${showNotices?'is-open':''}`}>
+      {fullscreen&&shownError&&<div className="web-service-note web-recovery" role="alert"><span>{shownError}</span>{sessionId&&<button onClick={()=>navigation('reload')}>重新载入网页</button>}</div>}
       {offline && <div className="web-service-note" role="alert">网页服务尚未启动。<span>在项目终端运行 <code>npm run web:backend</code>，然后打开网址。</span></div>}
       {status?.translationError && <div className="web-service-note web-translation-warning" role="alert"><span>{status.translationError} 未完成的内容保留原文。</span><button onClick={() => sendCommand({ type: 'retry' })}>重试翻译</button></div>}
       {sessionId && !connected && <div className="web-service-note web-recovery" role="alert"><span>连接已断开，正在恢复。页面操作暂时暂停。</span><button onClick={() => reconnect.current?.()}>重新连接</button><button onClick={() => void open(url)}>重新打开网址</button></div>}
       {!!status?.resourceFailures && <div className="web-service-note web-recovery" role="alert"><span>{status.resourceFailures} 项图片、字体或样式未加载，页面可能显示不完整。</span><button onClick={() => sendCommand({ type: 'resources' })}>重试资源</button></div>}
+      </div>
       <div className="comparison-controls">
         <div className="sync-controls"><div className="web-history">{[['back','网页后退',ArrowLeft],['forward','网页前进',ArrowRight],['reload','重新载入网页',ArrowsClockwise]].map(([action,label,Icon]) => { const Glyph = Icon as typeof ArrowLeft; return <button key={action as string} className="icon-button" aria-label={label as string} disabled={!sessionId || !connected || opening} onClick={() => navigation(action as string)}><Glyph size={16} /></button>; })}</div><button className={`sync-toggle ${linked ? 'is-linked' : ''}`} role="switch" aria-checked={linked} onClick={() => setLinked(value => !value)}>{linked ? <LinkSimple size={17} /> : <LinkSimpleBreak size={17} />}<span>滚动联动{linked ? '开启' : '关闭'}</span><i aria-hidden="true" /></button></div>
         <div className="zoom-controls"><label className="viewport-mode"><span>网页视口</span><select aria-label="网页视口" value={mode} onChange={event=>setMode(event.target.value as typeof mode)}><option value="desktop">桌面网页</option><option value="adaptive">自适应视口</option></select></label><button className="reading-tool" aria-pressed={fit} onClick={()=>setFit(value=>!value)}>适应宽度</button><button className="icon-button" aria-label="缩小两侧页面" disabled={!fit&&zoom<=.25} onClick={()=>bumpZoom(-.25)}><Minus size={15} /></button><select aria-label="两侧缩放比例" value={fit?'fit':zoom} onChange={event=>{setFit(false);setZoom(Number(event.target.value));}}>{fit&&<option value="fit">{Math.round(scale*100)}%（适应）</option>}{[.25,.5,.75,1,1.25,1.5,1.75,2].map(value => <option key={value} value={value}>{Math.round(value * 100)}%</option>)}</select><button className="icon-button" aria-label="放大两侧页面" disabled={!fit&&zoom>=2} onClick={()=>bumpZoom(.25)}><Plus size={15} /></button><button className="icon-button" aria-label="重置缩放为 100%" disabled={!fit&&zoom===1} onClick={()=>{setFit(false);setZoom(1);}}><ArrowCounterClockwise size={17} /></button></div>
       </div>
-      <div className="reading-controls"><button className="reading-tool" disabled={!connected} aria-pressed={inspectMode} onClick={()=>setInspectMode(value=>!value)}>查看段落原文</button><button className="reading-tool" disabled={!connected||!status?.blocks.some(block=>block.state!=='translated')} onClick={()=>mirror.current?.locateUntranslated()}>定位未译段落</button><span role="status">{inspectMode?'点击任意一侧的段落查看原文；关闭后继续网页交互。':readingNote||'阅读位置自动保存在此浏览器。'}</span></div>
+      <div className="reading-controls"><button className="reading-tool" disabled={!connected} aria-pressed={inspectMode} onClick={()=>setInspectMode(value=>!value)}>查看段落原文</button><button className="reading-tool" disabled={!connected||!status?.blocks.some(block=>block.state!=='translated')} onClick={()=>mirror.current?.locateUntranslated()}>定位未译段落</button><span role="status">{inspectMode?'点击任意一侧的段落查看原文；关闭后继续网页交互。':readingNote||'阅读位置自动保存在此浏览器。'}</span><button ref={fullscreenButton} className="reading-tool fullscreen-reading-toggle" aria-pressed={fullscreen} onClick={()=>{setFullscreen(value=>!value);setShowNotices(false);}}>{fullscreen?<ArrowsIn size={15}/>:<ArrowsOut size={15}/>} {fullscreen?'退出全屏':'全屏阅读'}</button></div>
       {inspection&&<aside className="paragraph-inspector" aria-label="段落对照"><div className="inspector-heading"><strong>{inspection.block.attribute?`${inspection.block.attribute} 文案`:'段落对照'}</strong><span>{{pending:'等待翻译',translating:'正在翻译',translated:'已翻译',failed:'翻译未完成'}[inspection.block.state]}</span><button disabled={!connected||inspection.block.state==='translating'} onClick={()=>sendCommand({type:'retry',epoch:mirror.current?.epoch,id:inspection.block.id,key:inspection.block.key})}>重译这一段</button><button aria-label="关闭段落对照" onClick={()=>{mirror.current?.closeInspection();setInspectMode(false);}}>关闭</button></div><div className="inspector-text"><div><small>原文</small><p>{inspection.source}</p></div><div><small>译文</small><p>{inspection.block.state==='translated'?inspection.translated:inspection.block.state==='failed'?'该段未完成，可单独重试。':'译文完成后会显示在这里。'}</p></div></div></aside>}
       <section className="web-comparison" aria-label="网页翻译对照">
         {([0,1] as const).map(side => <section className={`web-pane ${side === 0 ? 'web-source' : 'web-target'}`} aria-label={side === 0 ? '左侧原文页面' : '右侧译文页面'} key={side}>

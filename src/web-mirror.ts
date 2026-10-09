@@ -33,7 +33,7 @@ export class WebMirror {
   private disposed = false;
   private lastHover = -1;
 
-  constructor(private roots: HTMLElement[], private command: (value: WebCommand) => void, private changeZoom: (delta: number) => void, private renderError: () => void, private reading: { inspect?:(value:ParagraphInspection|null)=>void; interacted?:()=>void } = {}) { this.roots=[...roots]; this.createPlayers(); }
+  constructor(private roots: HTMLElement[], private command: (value: WebCommand) => void, private changeZoom: (delta: number) => void, private renderError: () => void, private reading: { inspect?:(value:ParagraphInspection|null)=>void; interacted?:()=>void; escape?:()=>boolean } = {}) { this.roots=[...roots]; this.createPlayers(); }
   private createPlayers() {
     this.players = this.roots.map((root, side) => {
       const player = new Replayer([], { root, liveMode: true, mouseTail: false, showWarning: true, useVirtualDom: false,
@@ -315,6 +315,7 @@ export class WebMirror {
       input(event);
     });
     on('keydown', event => {
+      if((event as KeyboardEvent).key==='Escape'&&this.reading.escape?.()){event.preventDefault();event.stopPropagation();return;}
       this.reading.interacted?.();
       const keyboard = event as KeyboardEvent, { node, id } = identify(event);
       if (!node || id < 0) return;
