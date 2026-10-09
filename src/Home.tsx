@@ -23,13 +23,13 @@ export default function Home() {
             <div className="entry-bottom"><span>上传文件，开始翻译</span><span>最大 50 MB <ArrowRight size={16} /></span></div>
           </AppLink>
           <AppLink href="/web" className="feature-entry web-entry">
-            <div className="entry-topline"><GlobeHemisphereWest size={26} weight="duotone" /><span>网页内容</span><span className="demo-label">交互 Demo</span><ArrowRight className="entry-arrow" size={22} /></div>
+            <div className="entry-topline"><GlobeHemisphereWest size={26} weight="duotone" /><span>网页内容</span><ArrowRight className="entry-arrow" size={22} /></div>
             <div className="entry-visual browser-visual" aria-hidden="true">
               <div className="browser-sample"><div className="browser-sample-bar"><span>transflow.demo / guide</span></div><div className="browser-sample-content"><span>READ TOGETHER</span><strong>Same page.<br />A shared perspective.</strong><p>Keep your place.<br />Explore with context.</p><div><span>Overview</span><ArrowDown size={13} /></div></div></div>
               <div className="paired-cursor"><CursorClick size={28} weight="fill" /><span>两侧联动</span></div>
             </div>
-            <div className="entry-copy"><h2>网页翻译</h2><p>在原站结构中，体验双侧联动浏览。</p></div>
-            <div className="entry-bottom"><span>体验示例网页</span><span>暂不接入真实翻译 <ArrowRight size={16} /></span></div>
+            <div className="entry-copy"><h2>网页翻译</h2><p>保留原站结构，双侧联动浏览。</p></div>
+            <div className="entry-bottom"><span>输入网址，开始翻译</span><span>公开网页 <ArrowRight size={16} /></span></div>
           </AppLink>
         </section>
         <footer className="home-footer"><span><TextAlignLeft size={16} />熟悉的排版，更连贯的阅读</span><span><LockSimple size={15} />PDF 本机存储</span></footer>

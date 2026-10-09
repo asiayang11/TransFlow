@@ -3,6 +3,7 @@ import Home from "./Home";
 
 const PdfWorkspace = lazy(() => import("./PdfWorkspace"));
 const WebDemo = lazy(() => import("./WebDemo"));
+const WebWorkspace = lazy(() => import("./WebWorkspace"));
 
 export default function App() {
   const [path, setPath] = useState(window.location.pathname);
@@ -12,12 +13,12 @@ export default function App() {
     return () => window.removeEventListener("popstate", update);
   }, []);
   useEffect(() => {
-    document.title = path === "/web" ? "网页翻译 Demo · TransFlow" : path === "/pdf" || path.startsWith("/tasks/") ? "PDF 翻译 · TransFlow" : "TransFlow · 对照翻译工作台";
+    document.title = path === "/web" ? "网页对照翻译 · TransFlow" : path === "/web/demo" ? "网页翻译 Demo · TransFlow" : path === "/pdf" || path.startsWith("/tasks/") ? "PDF 翻译 · TransFlow" : "TransFlow · 对照翻译工作台";
   }, [path]);
 
   return (
     <Suspense fallback={<main className="route-loading" role="status"><span className="brand-mark">T</span><p>正在打开工作区…</p></main>}>
-      {path === "/pdf" || path.startsWith("/tasks/") ? <PdfWorkspace /> : path === "/web" ? <WebDemo /> : <Home />}
+      {path === "/pdf" || path.startsWith("/tasks/") ? <PdfWorkspace /> : path === "/web" ? <WebWorkspace /> : path === "/web/demo" ? <WebDemo /> : <Home />}
     </Suspense>
   );
 }

@@ -6,15 +6,25 @@
   "type": "module",
   "scripts": {
     "backend": "./scripts/backend-dev.sh",
+    "web:backend": "node server/web/main.mjs",
+    "web:install": "playwright install chromium",
+    "test:web": "node --test tests/web-*.test.mjs",
     "dev": "vite --host 127.0.0.1 --port 5173",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
-    "check": "npm run build && npm run test:frontend",
-    "test:frontend": "node --test tests/*.test.mjs"
+    "check": "npm run build && npm run test:frontend && npm run test:web:unit",
+    "test:frontend": "node --test tests/latest-request.test.mjs",
+    "test:web:unit": "node --test tests/web-core.test.mjs",
+    "check:web:live": "node scripts/web-compat.mjs"
   },
   "dependencies": {
     "@phosphor-icons/react": "2.1.10",
+    "@rrweb/record": "2.1.6",
+    "@rrweb/replay": "2.1.6",
+    "@rrweb/types": "2.1.6",
+    "ipaddr.js": "2.5.0",
     "pdfjs-dist": "4.10.38",
+    "playwright": "1.64.0",
     "react": "19.0.0",
     "react-dom": "19.0.0"
   },

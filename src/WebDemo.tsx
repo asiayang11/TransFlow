@@ -70,7 +70,7 @@ export default function WebDemo() {
     panes.current.forEach((pane) => pane?.scrollTo({ top: 0, left: 0, behavior: "instant" }));
   };
   useEffect(() => {
-    const handleLocation = () => { if (window.location.pathname === "/web") resetDocument(sampleFromLocation()); };
+    const handleLocation = () => { if (window.location.pathname === "/web/demo") resetDocument(sampleFromLocation()); };
     window.addEventListener("popstate", handleLocation);
     return () => { window.removeEventListener("popstate", handleLocation); if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current); };
   }, []);
@@ -93,7 +93,7 @@ export default function WebDemo() {
 
   const chooseSample = (next: SampleId) => {
     if (sample === next) resetDocument(next);
-    else navigate(`/web?sample=${next}`);
+    else navigate(`/web/demo?sample=${next}`);
     setNotice(`已打开${SAMPLES[next].label}示例，两侧展示相同内容。`);
   };
   const openUrl = (event: FormEvent) => {
@@ -103,7 +103,7 @@ export default function WebDemo() {
     catch { setError("请输入有效的网址，或选择下方的示例页面。"); return; }
     if (!/^https?:$/.test(parsed.protocol) || !parsed.hostname.includes(".")) { setError("请输入以 http:// 或 https:// 开头的有效网址。"); return; }
     const next = SAMPLE_IDS.find((id) => parsed.origin === "https://demo.transflow.local" && parsed.pathname.replace(/\/$/, "") === `/${id}` && !parsed.search && !parsed.hash && !parsed.username && !parsed.password);
-    if (!next) { setError("当前 Demo 仅支持下方三个内置示例。真实网址加载将在审核后接入。"); return; }
+    if (!next) { setError("当前为旧版交互 Demo，仅支持内置示例。请从顶部「网页翻译」打开真实网址。"); return; }
     chooseSample(next);
   };
   const anchor = (side: Side, id: string) => {

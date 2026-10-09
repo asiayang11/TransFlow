@@ -1,0 +1,98 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import { build } from 'esbuild';
+import { chromium } from 'playwright';
+import { READING_KEY,parseReading,viewportLayout } from '../shared/web-reading.mjs';
+import { startWebServer } from '../server/web/main.mjs';
+const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function until(check){const end=Date.now()+12000;while(!await check()){if(Date.now()>end)throw Error('reading assertion timeout');await delay(40);}}
+test('saved reading rejects invalid URLs and corrupt positions without breaking preferences',()=>{
+ const saved={version:1,url:'https://example.com/docs',language:'ja',mode:'adaptive',zoom:1.25,fit:false,position:{domId:'section',tag:'P',text:'Original',fraction:.3,before:0,ratio:.4,left:0}};
+ assert.equal(parseReading(JSON.stringify(saved)).position.text,'Original');
+ assert.equal(parseReading(JSON.stringify({...saved,position:{...saved.position,ratio:2}})).position,null);
+ for(const url of ['javascript:alert(1)','file:///tmp/key','https://u:p@example.com'])assert.equal(parseReading(JSON.stringify({...saved,url})),null);
+ assert.equal(parseReading('broken'),null);
+});
+test('desktop fitting changes display scale while preserving website breakpoint width',()=>{
+ assert.deepEqual(viewportLayout({paneWidth:640,paneHeight:500,mode:'desktop',zoom:1,fit:true}),{width:1280,height:1000,scale:.5});
+ assert.deepEqual(viewportLayout({paneWidth:640,paneHeight:500,mode:'adaptive',zoom:1,fit:true}),{width:640,height:500,scale:1});
+ assert.equal(viewportLayout({paneWidth:640,paneHeight:500,mode:'desktop',zoom:1.25,fit:false}).width,1280);
+});
+test('workbench persists semantic reading, fits desktop, inspects and retries one paragraph, switches language and navigates', {timeout:45000},async t=>{
+ let invalid=true,backend,browserContext,fixtureBrowser; const calls=[];
+ const model=http.createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const request=JSON.parse(raw),items=JSON.parse(request.messages[1].content).items;calls.push(items.map(item=>item.id));const prefix=request.messages[0].content.includes('日本語')?'日: ':'译: ';res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({items:items.map(item=>({id:item.id,...(item.segments?{segments:item.segments.map(segment=>({...segment,text:segment.protected?(invalid&&segment.text==='fetch()'?'mutated()':segment.text):prefix+segment.text}))}:{text:prefix+item.text})}))})}}]}));});
+ await new Promise(resolve=>model.listen(0,'127.0.0.1',resolve));
+ const bundle=await build({stdin:{contents:"import React from 'react';import{createRoot}from'react-dom/client';import Web from './src/WebWorkspace.tsx';window.testRoot=createRoot(document.getElementById('app'));window.testRoot.render(<React.StrictMode><Web/></React.StrictMode>);",resolveDir:process.cwd(),loader:'tsx'},bundle:true,write:false,format:'iife',jsx:'automatic',loader:{'.css':'empty'},define:{'process.env.NODE_ENV':'"development"'}});
+ const app=http.createServer((req,res)=>{
+  if(req.url.startsWith('/api/')){const proxy=http.request({hostname:'127.0.0.1',port:backend.server.address().port,path:req.url,method:req.method,headers:{...req.headers,host:`127.0.0.1:${backend.server.address().port}`}},response=>{res.writeHead(response.statusCode,response.headers);response.pipe(res);});req.pipe(proxy);return;}
+  if(req.url==='/bundle.js'){res.setHeader('Content-Type','application/javascript');res.end(bundle.outputFiles[0].text);return;}
+  res.setHeader('Content-Type','text/html');res.end('<html><head><style>.web-comparison{display:flex;gap:20px}.web-pane{width:640px}.mirror-host{height:500px;width:640px;overflow:auto}.inspector-text{display:flex;gap:20px}.paragraph-inspector{max-height:220px;overflow:auto}</style></head><body><div id="app"></div><script src="/bundle.js"></script></body></html>');
+ });await new Promise(resolve=>app.listen(0,'127.0.0.1',resolve));const appUrl=`http://127.0.0.1:${app.address().port}`;
+ let loads=0,updated=false;
+ const fixture=url=>`<!doctype html><html><body>${'<span hidden>new IDs</span>'.repeat(++loads)}<h1>${url.includes('/second')?'Second article':'First article'}</h1><p id="sentence">Read <a href="#p20">the docs</a> with <code>fetch()</code>.</p><details><summary>Expand content</summary><p>Expanded content</p></details><a id="next" href="https://1.1.1.1/second">Next article</a>${Array.from({length:40},(_,i)=>`<p id="p${i}" style="min-height:120px">${updated?'Updated ':''}Paragraph ${i} about preserving your reading position.</p>`).join('')}</body></html>`;
+ backend=await startWebServer({port:0,config:{key:'test',model:'fixture',base:`http://127.0.0.1:${model.address().port}`},origins:[appUrl],prepareContext:context=>context.route('**/*',route=>route.fulfill({contentType:'text/html',body:fixture(route.request().url())}))});
+ t.after(async()=>{await fixtureBrowser?.close();await backend?.close();await new Promise(resolve=>app.close(resolve));await new Promise(resolve=>model.close(resolve));});
+ fixtureBrowser=await chromium.launch({headless:true,chromiumSandbox:true});browserContext=await fixtureBrowser.newContext({viewport:{width:1400,height:1000}});const page=await browserContext.newPage();page.setDefaultTimeout(10000);const errors=[];page.on('pageerror',error=>errors.push(error.message));await page.goto(appUrl+'/web');
+ await page.getByRole('textbox',{name:'网页地址'}).fill('https://1.1.1.1/first');await page.getByRole('button',{name:'打开并翻译',exact:true}).click();
+ const session=()=>[...backend.sessions.sessions.values()].at(-1);
+ await until(()=>session()?.failed.size===1&&session()?.translations.size>=43);
+ const source=()=>page.locator('.web-source iframe').contentFrame(),target=()=>page.locator('.web-target iframe').contentFrame();
+ assert.equal(await session().page.evaluate(()=>innerWidth),1280);
+ assert.equal(await page.locator('.mirror-root').first().evaluate(node=>node.style.zoom),'0.5');
+ await page.getByRole('button',{name:'适应宽度',exact:true}).click();await until(()=>page.locator('.mirror-root').first().evaluate(node=>node.style.zoom==='1'));
+ await page.locator('.mirror-host').first().evaluate(node=>node.scrollLeft=300);
+ await until(()=>page.locator('.mirror-host').last().evaluate(node=>node.scrollLeft===300));
+ await page.locator('.mirror-host').first().evaluate(node=>node.scrollLeft=0);
+ await page.getByRole('button',{name:'定位未译段落',exact:true}).click();
+ await page.locator('.paragraph-inspector').waitFor();assert.match(await page.locator('.paragraph-inspector').innerText(),/Read the docs with fetch/);
+ const before=[...session().translations.keys()],beforeCalls=calls.length;invalid=false;
+ await page.getByRole('button',{name:'重译这一段',exact:true}).click();await until(()=>session().failed.size===0&&calls.length>beforeCalls);
+ assert.equal(before.every(id=>session().translations.has(id)),true,'single retry retains every successful peer');assert.equal(calls.at(-1).length,1);
+ const block=session().blocks.find(block=>block.source.includes('Read '));
+ await assert.rejects(backend.sessions.command(session(),{type:'retry',requestId:'stale',epoch:'old',id:block.id,key:block.key}),/段落已变化/);
+ await page.getByRole('button',{name:'关闭段落对照',exact:true}).click();await page.getByRole('button',{name:'查看段落原文',exact:true}).click();
+ await target().locator('#sentence a').evaluate(node=>node.click());assert.match(await page.locator('.paragraph-inspector').innerText(),/fetch/);
+ assert.equal(await target().locator('html').evaluate(node=>node.scrollTop)<1000,true,'inspection click does not navigate its inline link');
+ await page.getByRole('button',{name:'关闭段落对照',exact:true}).click();
+ assert.equal(await page.getByRole('button',{name:'查看段落原文',exact:true}).getAttribute('aria-pressed'),'false');
+ await page.getByRole('combobox',{name:'网页视口',exact:true}).selectOption('adaptive');await until(()=>session().page.evaluate(()=>innerWidth===640));
+ await page.getByRole('combobox',{name:'目标语言',exact:true}).selectOption('ja');await until(()=>session().language==='ja'&&session().translations.size>=43);
+ await source().locator('html').evaluate(node=>node.ownerDocument.defaultView.scrollTo(0,1800));
+ await until(()=>page.evaluate(key=>JSON.parse(localStorage.getItem(key)||'{}').position?.ratio>.2,READING_KEY));
+ const oldId=session().id,saved=await page.evaluate(key=>JSON.parse(localStorage.getItem(key)),READING_KEY);
+ await page.reload();await until(()=>session()?.id!==oldId&&session()?.language==='ja'&&session()?.translations.size>=43);
+ await until(()=>page.locator('.reading-controls').innerText().then(text=>text.includes('已恢复上次阅读位置')));
+ assert.equal(await page.getByRole('combobox',{name:'网页视口',exact:true}).inputValue(),'adaptive');
+ const restored=await page.evaluate(key=>JSON.parse(localStorage.getItem(key)),READING_KEY);assert.equal(restored.position.domId,saved.position.domId);assert.equal(restored.position.text,saved.position.text);
+ assert.ok(await source().locator('html').evaluate(node=>node.scrollTop)>1000);
+ await source().locator('summary').click();await until(()=>target().locator('details').getAttribute('open').then(value=>value!==null));
+ await target().locator('summary').click();await until(()=>source().locator('details').getAttribute('open').then(value=>value===null));
+ await target().locator('#next').click();await until(()=>session().url.endsWith('/second'));
+ await page.getByRole('button',{name:'网页后退',exact:true}).click();await until(()=>session().url.endsWith('/first'));
+ await page.getByRole('button',{name:'网页前进',exact:true}).click();await until(()=>session().url.endsWith('/second'));
+ await source().locator('html').evaluate(node=>node.ownerDocument.defaultView.scrollTo(0,1800));
+ await until(()=>page.evaluate(key=>JSON.parse(localStorage.getItem(key)||'{}').position?.ratio>.2,READING_KEY));
+ const lastId=session().id;updated=true;await page.reload();await until(()=>session()?.id!==lastId&&session()?.url.endsWith('/second'));
+ await until(()=>page.locator('.reading-controls').innerText().then(text=>text.includes('页面内容已变化')));
+ assert.ok(await source().locator('html').evaluate(node=>node.scrollTop)>1000,'changed source falls back to reading progress');
+ const beforeUnmount=await page.evaluate(key=>JSON.parse(localStorage.getItem(key)).position,READING_KEY);
+ await page.evaluate(()=>window.testRoot.unmount());
+ assert.deepEqual(await page.evaluate(key=>JSON.parse(localStorage.getItem(key)).position,READING_KEY),beforeUnmount,'unmount never replaces the last valid position with an empty mirror');
+ await page.evaluate(key=>{const saved=JSON.parse(localStorage.getItem(key));saved.position=null;localStorage.setItem(key,JSON.stringify(saved));},READING_KEY);
+ await page.reload();await until(()=>page.locator('.reading-controls').innerText().then(text=>text.includes('已重新打开上次网页')));
+ assert.deepEqual(errors,[]);
+});
+
+test('same asset URL stays isolated between authoritative browser sessions', {timeout:15000},async t=>{
+ let index=0;
+ const {BrowserSessions}=await import('../server/web/sessions.mjs');
+ const manager=new BrowserSessions({},{prepareContext:async context=>{const color=++index===1?'red':'blue';await context.route('**/*',route=>route.request().url().endsWith('.svg')?route.fulfill({contentType:'image/svg+xml',body:`<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="${color}"/></svg>`}):route.fulfill({contentType:'text/html',body:'<!doctype html><html><body><h1>Isolated page</h1><img src="https://1.1.1.1/logo.svg"></body></html>'}));}});
+ t.after(()=>manager.shutdown());
+ const one=await manager.create({url:'https://1.1.1.1/one'}),two=await manager.create({url:'https://1.1.1.1/two'});
+ await Promise.all([one.queue,two.queue]);await until(()=>one.assets.has('https://1.1.1.1/logo.svg')&&two.assets.has('https://1.1.1.1/logo.svg'));
+ const urlOne=manager.assetUrl(one,'https://1.1.1.1/logo.svg'),urlTwo=manager.assetUrl(two,'https://1.1.1.1/logo.svg');assert.notEqual(urlOne,urlTwo);
+ const key=urlOne.split('/').at(-1);assert.match((await manager.asset(one,key)).body.toString(),/red/);assert.match((await manager.asset(two,key)).body.toString(),/blue/);
+ await assert.rejects(manager.asset(two,'0'.repeat(64)),/资源不存在/);
+ await manager.close(one);assert.equal(two.closed,false);assert.match((await manager.asset(two,key)).body.toString(),/blue/);
+});

@@ -1,6 +1,8 @@
 # TransFlow
 
-首页现在提供两个入口：**PDF 翻译**（`/pdf`，原有完整流程）和 **网页翻译 Demo**（`/web`）。网页 Demo 使用三个内置示例，左右显示相同内容，支持双向滚动联动、同步缩放、标签、折叠、搜索和收藏；不加载外部网址，不执行真实翻译，也不需要启动后端。审核范围和验证记录见 [Demo 审核说明](docs/demo-review.md)。
+首页提供 **PDF 翻译**（`/pdf`）和 **网页翻译**（`/web`）两个入口。网页 MVP 可打开公开网址，保留原站结构进行双语对照，支持双侧常见交互、滚动联动和同步缩放。网页服务独立启动，不加载 PDF 模型；能力与限制见 [网页 MVP 说明](docs/web-mvp.md)。旧版同页交互 Demo 保留在 `/web/demo`。
+
+仅使用网页翻译：安装 Node.js 20+，运行 `npm ci`、`npm run web:install`，配置 `.env` 中的模型参数后，在两个终端分别运行 `npm run web:backend` 和 `npm run dev`，打开 `http://127.0.0.1:5173/web`。以下 Python 安装步骤仅供 PDF 功能使用。
 
 本地运行的 PDF 翻译工作台：拖入 PDF，逐页查看原文与译文，并在翻译完成后下载译文 PDF。后端使用 [PDFMathTranslate-next（`pdf2zh-next`）](https://github.com/PDFMathTranslate-next/PDFMathTranslate-next) / BabelDOC 分析和重建页面；前端用 PDF.js 并排显示两份 PDF，而不是用 HTML 文本盖在原文上。
 
@@ -101,3 +103,6 @@ npm run check
 ## License
 
 TransFlow 自身代码采用 [GNU Affero General Public License v3.0](LICENSE)（`AGPL-3.0-only`）。上游 `pdf2zh-next==2.8.2` 也标注为 [AGPL-3.0](https://pypi.org/project/pdf2zh-next/2.8.2/)；其他依赖仍保留各自的许可证。AGPL 不是“仅限非商业使用”许可证。若未来向他人分发或提供网络服务，应遵守适用的源码提供等义务，并核对模型服务条款。
+
+网页翻译 P0 的兼容性、性能、交互和失败恢复验收见 [docs/web-p0-review.md](docs/web-p0-review.md)。
+网页翻译 P1 已增加阅读恢复、桌面/自适应视口、段落查看与单段重试，验收见 [docs/web-p1-review.md](docs/web-p1-review.md)。
