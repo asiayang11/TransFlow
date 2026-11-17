@@ -3,16 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="theme-color" content="#f7f6f2" />
     <meta
       name="description"
-      content="TransFlow - 拖入 PDF，按页获得多模态翻译并左右对照阅读。"
+      content="TransFlow 对照翻译工作台：保留版式翻译 PDF，体验网页双侧联动阅读。"
     />
-    <title>TransFlow · PDF 多模态翻译</title>
+    <title>TransFlow · 对照翻译工作台</title>
+    <script>
+      try {
+        const preference = localStorage.getItem("transflow-theme");
+        document.documentElement.dataset.theme = preference === "dark" || preference === "light" ? preference : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      } catch {
+        document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-
