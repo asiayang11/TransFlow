@@ -1,14 +1,19 @@
 # TransFlow
 
-首页提供 **PDF 翻译**（`/pdf`）和 **网页翻译**（`/web`）两个入口。网页 MVP 可打开公开网址，保留原站结构进行双语对照，支持双侧常见交互、滚动联动和同步缩放。网页服务独立启动，不加载 PDF 模型；能力与限制见 [网页 MVP 说明](docs/web-mvp.md)。旧版同页交互 Demo 保留在 `/web/demo`。
+TransFlow 是本地双语阅读工作台。打开公开网页或上传 PDF，即可在同一窗口对照原文和译文。网页翻译与 PDF 翻译使用独立后端，可以按需启动。
 
-仅使用网页翻译：安装 Node.js 20+，运行 `npm ci`、`npm run web:install`，配置 `.env` 中的模型参数后，在两个终端分别运行 `npm run web:backend` 和 `npm run dev`，打开 `http://127.0.0.1:5173/web`。以下 Python 安装步骤仅供 PDF 功能使用。
+## 网页翻译
 
-本地运行的 PDF 翻译工作台：拖入 PDF，逐页查看原文与译文，并在翻译完成后下载译文 PDF。后端使用 [PDFMathTranslate-next（`pdf2zh-next`）](https://github.com/PDFMathTranslate-next/PDFMathTranslate-next) / BabelDOC 分析和重建页面；前端用 PDF.js 并排显示两份 PDF，而不是用 HTML 文本盖在原文上。
+- 打开公开网址，按段落生成译文。两侧保留网页结构，支持滚动联动、同步缩放、常见页面交互、全屏阅读和阅读位置恢复。
+- 自动识别上下文中的专名，只追加复核有歧义的候选。确认保留的名称由后端按原文回填。模型遗漏行内节点或占位符时，只对受影响的段落自动恢复，原有链接、代码和独立标点继续保留。
+- 通过「定位未译段落」查找未完成内容，也可以查看原文、逐段重试。全屏下点击「提示」会列出失败段落的错误码和原因。最终失败记录写入 `runtime/web/translation-errors.jsonl`。
+- 源站返回 HTTP 404 或 410 的图片、字体和样式会单独提示。「重试资源」用于暂时加载失败的资源。
 
-> 当前是个人使用的 MVP，不是托管服务。现有翻译链路调用 **OpenAI-compatible 文本接口**；它不会把页面图片传给多模态模型。版面重建和语义翻译是两件事，图文位置尽量对应不等于译文质量已得到保证。
+网页模式面向公开文章和技术文档。登录页面、复杂表单、图内文字和视频翻译尚未支持。内置示例位于 `/web/demo`，技术边界和验收见 [网页 MVP 说明](docs/web-mvp.md)、[兼容性验收](docs/web-p0-review.md)及[阅读功能验收](docs/web-p1-review.md)。
 
-## 已支持什么
+## PDF 翻译
+
+上传 PDF 后逐页对照阅读，完成后可下载译文 PDF。后端用 [PDFMathTranslate-next](https://github.com/PDFMathTranslate-next/PDFMathTranslate-next) 和 BabelDOC 分析及重建版面，前端用 PDF.js 并排显示原文和译文。
 
 | 能力 | 当前行为 |
 | --- | --- |
@@ -24,12 +29,10 @@
 
 ## 快速开始
 
-已在 macOS + Node.js 20+ + Python 3.12 上开发验证；其他系统尚未做完整验收。建议安装 [uv](https://docs.astral.sh/uv/) 管理 Python 环境。首次运行需要联网安装依赖，以及下载 BabelDOC 所需的版面模型和字体；后续启动会复用本机缓存，但进程重启仍需重新将模型载入内存。
+项目在 macOS 上用 Node.js 20+ 验证，PDF 后端另用 Python 3.12。首次安装时运行以下命令，已有 `.env` 时直接编辑它。
 
 ```bash
 npm ci
-uv venv --python 3.12 .venv-babeldoc
-uv pip install --python .venv-babeldoc/bin/python -r server/requirements.txt
 cp .env.example .env
 ```
 
@@ -44,27 +47,46 @@ OPENAI_BASE_URL=https://你的兼容服务地址/v1
 
 `OPENAI_BASE_URL` 应是兼容服务的 API 根地址，**不要**加 `/chat/completions`。例如已验证过 `https://ark-cn-beijing.bytedance.net/api/v3` 的 `chat/completions` 链路；使用其他服务时请按其文档填写根地址。后端不会发送 `verbosity` 字段。模型需要支持兼容的 Chat Completions 文本请求；仅“配置了 Key”不等于模型一定可用。不要提交 `.env` 或在客户端代码里填写密钥。
 
-分别在两个终端启动：
-
-```bash
-npm run backend
-```
+在一个终端启动前端：
 
 ```bash
 npm run dev
 ```
 
-打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。后端默认监听 `127.0.0.1:8787`；可用 `http://127.0.0.1:8787/api/v1/health` 查看服务状态。修改 `.env` 后需要重启后端。
+**使用网页翻译**时，安装 Chromium，再在另一个终端启动网页后端。网页模式只需 Node.js 和 Chromium。
 
-使用流程：
+```bash
+npm run web:install
+npm run web:backend
+```
+
+打开[网页翻译工作台](http://127.0.0.1:5173/web)，输入公开网址、选择目标语言，点击「打开并翻译」。后端默认端口为 `8788`，在 [网页健康检查](http://127.0.0.1:8788/api/web/health) 查看服务状态。
+
+**使用 PDF 翻译**时，建议通过 [uv](https://docs.astral.sh/uv/) 安装 Python 依赖，然后启动 PDF 后端。初次运行会下载版面模型和字体，后续启动复用本机缓存。
+
+```bash
+uv venv --python 3.12 .venv-babeldoc
+uv pip install --python .venv-babeldoc/bin/python -r server/requirements.txt
+npm run backend
+```
+
+打开 [PDF 翻译工作台](http://127.0.0.1:5173/pdf)。后端默认端口为 `8787`，在 [PDF 健康检查](http://127.0.0.1:8787/api/v1/health) 查看服务状态。
 
 1. 在首页选择「PDF 翻译」，在上传页选目标语言，把 PDF 拖入页面或点击选择文件。
 2. 原文可立即阅读；译文页按队列和阶段逐页生成，完成后自动显示在右侧。若页面提示「需复核」，请人工检查漏译、图表和公式。
 3. 翻页会预取附近页面。若需要整本译文，点击「翻译全文」，待全部页面完成后下载。保存任务 URL 可继续阅读。
 
-模型请求可能产生费用；翻译所需的文本会发送到 `.env` 指定的模型服务商。原始 PDF、单页产物和任务记录保存在本机 `runtime/`，不会因为离开页面而自动删除。任务 URL **不是访问控制机制**；当前没有账户、权限或对外部署防护，请保持默认的本地监听地址。
+两个后端可以同时运行，工作台首页为 [127.0.0.1:5173](http://127.0.0.1:5173)。修改 `.env` 或拉取服务端更新后，重启对应后端。网页会话在后端重启后需重新打开网址。
+
+翻译所需的文本会发送到 `.env` 指定的模型服务商，可能产生费用。原始 PDF、单页产物和任务记录保存在本机 `runtime/`。项目面向本地个人使用，默认只在本机监听。
 
 ## 配置与排障
+
+| 网页配置 | 默认值 | 用途 |
+| --- | --- | --- |
+| `TRANSFLOW_WEB_AUTO_TERMS` | `true` | 按网页上下文自动识别专名，并批量复核歧义项。 |
+| `TRANSFLOW_WEB_KEEP_TERMS` | `[]` | 追加明确保留原文的名称，如 `["MyProject"]`。 |
+| `TRANSFLOW_WEB_THINKING` | `disabled` | 方舟模型的思考模式，设为 `default` 使用模型默认配置。 |
 
 | 配置 | 默认值 | 用途 |
 | --- | --- | --- |
@@ -75,20 +97,23 @@ npm run dev
 | `TRANSFLOW_LLM_MAX_ATTEMPTS` / `TRANSFLOW_LLM_TIMEOUT_SECONDS` | `3` / `120` | 模型请求重试次数和单次超时秒数。 |
 | `TRANSFLOW_TRANSLATE_TABLE_TEXT` | `false` | 开启后按需加载表格 OCR；默认关闭以缩短普通页面等待。 |
 | `TRANSFLOW_KEEP_JOB_FILES` | `false` | 保留 BabelDOC 中间文件以便排障；会增加磁盘占用。 |
-| `TRANSFLOW_DATA_DIR` | `runtime` | 本地任务与耗时记录目录。 |
+| `TRANSFLOW_DATA_DIR` | `runtime` | PDF 任务、耗时记录和网页翻译诊断目录。 |
 
 完整默认配置见 [.env.example](.env.example)。页级数据位于 `runtime/{task_id}/timings/page-xxxx.json`，单次执行记录位于 `page-xxxx-attempt-yyyy.json`，汇总位于 `summary.json`；也可调用 `GET /api/v1/documents/{task_id}/timings`。
 
 如果右侧仍是英文，先检查页面或 `/api/v1/health` 是否标为 `mock`：Mock 只复制原文，用来验证交互，**不会翻译**。切回 `TRANSFLOW_LLM_MODE=openai`、重启后端，并重新上传生成真实任务；已有 Mock 任务不会变成译文任务。若是真实任务但提示「需复核」，应检查该页内容和模型返回，不要把 PDF 结构检查当作翻译质量保证。
 
-本地无模型费用地验证页面流程，可在 `.env` 中设 `TRANSFLOW_LLM_MODE=mock`。测试命令：
+本地无模型费用地验证 PDF 流程，可在 `.env` 中设 `TRANSFLOW_LLM_MODE=mock`。网页交互示例可直接使用 `/web/demo`，网页真实翻译需要模型配置。
+
+## 测试
 
 ```bash
 npm run check
+npm run test:web
 .venv-babeldoc/bin/python -m unittest discover -s server -p 'test_*.py' -v
 ```
 
-这些自动测试不调用真实模型；真实译文的语义质量仍需用目标 PDF 人工验收。
+`npm run test:web` 需要先安装 Chromium。上述测试使用本地测试数据和模型替身。另有 `npm run check:web:live` 可测试真实站点，会请求已配置的模型服务。
 
 ## 尚未支持 / 后续方向
 
@@ -103,6 +128,3 @@ npm run check
 ## License
 
 TransFlow 自身代码采用 [GNU Affero General Public License v3.0](LICENSE)（`AGPL-3.0-only`）。上游 `pdf2zh-next==2.8.2` 也标注为 [AGPL-3.0](https://pypi.org/project/pdf2zh-next/2.8.2/)；其他依赖仍保留各自的许可证。AGPL 不是“仅限非商业使用”许可证。若未来向他人分发或提供网络服务，应遵守适用的源码提供等义务，并核对模型服务条款。
-
-网页翻译 P0 的兼容性、性能、交互和失败恢复验收见 [docs/web-p0-review.md](docs/web-p0-review.md)。
-网页翻译 P1 已增加阅读恢复、桌面/自适应视口、段落查看与单段重试，验收见 [docs/web-p1-review.md](docs/web-p1-review.md)。
