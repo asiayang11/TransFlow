@@ -1,6 +1,6 @@
 import { WebTranslationError } from './diagnostics.mjs';
 
-export const TERM_POLICY_VERSION = 2;
+export const TERM_POLICY_VERSION = 3;
 
 const defaultTerms = [
   'Apache Kafka', 'Kafka', 'Apache Samza', 'Samza', 'Apache Hadoop', 'Hadoop',
@@ -29,7 +29,7 @@ export function parseExtraTerms(value) {
 
 const termError = (code, message) => new WebTranslationError(code, message, { format: true });
 
-export function protectTerms(block, matcher) {
+export function protectedTermSpans(block, matcher) {
   const matches = [...block.source.matchAll(matcher)].map(match => ({
     start: match.index, end: match.index + match[0].length,
   }));
@@ -37,7 +37,11 @@ export function protectTerms(block, matcher) {
   for (const span of block.termSpans ?? []) {
     if (!matches.some(match => match.start < span.end && span.start < match.end)) matches.push(span);
   }
-  matches.sort((left, right) => left.start - right.start);
+  return matches.sort((left, right) => left.start - right.start);
+}
+
+export function protectTerms(block, matcher) {
+  const matches = protectedTermSpans(block, matcher);
   if (!matches.length) return { input: block, restore: entry => entry };
 
   let prefix = '[[TF_TERM_';

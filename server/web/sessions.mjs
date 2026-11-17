@@ -6,6 +6,7 @@ import { parsePublicUrl, publicAddress, publicFetch, createPublicProxy } from '.
 import { LANGUAGES, requestWebModel, sourceKey, translateBatch } from './translation.mjs';
 import { discoverTermSpans, termWindow } from './term-discovery.mjs';
 import { translationDiagnostic } from './diagnostics.mjs';
+import { recoverLayout } from './layout-recovery.mjs';
 
 const recorder = await readFile(new URL('../../node_modules/@rrweb/record/dist/record.umd.cjs', import.meta.url), 'utf8');
 const scrollInstrumentation = `window.__transflowReadAnchor = ${readScrollAnchor.toString()};\n`;
@@ -408,52 +409,70 @@ export class BrowserSessions {
     session.controllers ||= new Set(); session.controllers.add(controller);
     let timedOut = false;
     const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, this.config.timeoutMs ?? 60000);
+    const attemptRequest = async operation => {
+      controller.signal.throwIfAborted();
+      const started = Date.now();
+      metrics.requests++;
+      try {
+        return await operation(usage => { if (isCurrent()) this.recordUsage(metrics, usage); });
+      } catch (error) {
+        if (isCurrent() && (!controller.signal.aborted || timedOut)) metrics.failedRequests++;
+        throw error;
+      } finally {
+        if (isCurrent()) metrics.durations.push(Date.now() - started);
+      }
+    };
+    const publish = entries => {
+      const current = new Map(session.blocks.map(block => [block.id, sourceKey(block)]));
+      const valid = [];
+      for (const entry of entries) {
+        const key = sourceKey(entry);
+        const cached = { text: entry.text, parts: entry.parts?.map(part => part.text) };
+        session.cache.set(`${language}:${key}`, cached);
+        if (session.cache.size > 6000) session.cache.delete(session.cache.keys().next().value);
+        if (current.get(entry.id) !== key) continue;
+        const translated = this.entry(entry, cached);
+        session.translations.set(entry.id, translated);
+        session.failed.delete(entry.id);
+        valid.push(translated);
+      }
+      if (valid.length && metrics.firstTranslationMs === null) metrics.firstTranslationMs = Date.now() - metrics.started;
+      if (valid.length) this.send(session, 'translations', { epoch, language, entries: valid });
+    };
     try {
-      const entries = [];
+      let entries = [];
       let failures = [];
-      let requested = blocks;
-      let retryingTerms = false;
       for (let attempt = 0; attempt < 2; attempt++) {
-        const started = Date.now(); session.metrics.requests++;
         try {
-          const result = await translateBatch(requested, language, this.config, controller.signal, usage => {
-            if (isCurrent()) this.recordUsage(metrics, usage);
-          });
+          entries = await attemptRequest(usage => translateBatch(blocks, language, this.config, controller.signal, usage));
           if (!isCurrent()) return;
-          entries.push(...result);
-          if (result.failures.length) session.metrics.failedRequests++;
-          if (retryingTerms) {
-            const retried = new Set(requested.map(block => block.id));
-            failures = failures.filter(failure => !retried.has(failure.id)).concat(result.failures);
-          } else {
-            failures = result.failures;
-            const retryIds = new Set(failures.filter(failure => failure.retryTerm).map(failure => failure.id));
-            if (retryIds.size && !attempt && !controller.signal.aborted) {
-              requested = blocks.filter(block => retryIds.has(block.id));
-              retryingTerms = true;
-              continue;
-            }
-          }
+          failures = entries.failures;
+          if (failures.length) metrics.failedRequests++;
           break;
-        }
-        catch (error) {
+        } catch (error) {
           if (!isCurrent()) return;
-          if (!controller.signal.aborted || timedOut) session.metrics.failedRequests++;
-          if (retryingTerms) {
-            const retried = new Set(requested.map(block => block.id));
-            const diagnostic = translationDiagnostic(error, timedOut);
-            failures = failures.map(failure => retried.has(failure.id) ? { id: failure.id, ...diagnostic } : failure);
+          if (error.format) {
+            failures = blocks.map(block => ({ id: block.id, ...translationDiagnostic(error), recoverLayout: true }));
             break;
           }
           if (attempt || controller.signal.aborted || ['MODEL_AUTH', 'MODEL_NOT_CONFIGURED', 'MODEL_MOCK_MODE'].includes(error.code)) throw error;
           if (error.code === 'MODEL_RATE_LIMIT' || error.httpStatus >= 500) await new Promise(resolve => { const timer = setTimeout(resolve, 1000); controller.signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); });
-        } finally {
-          if (isCurrent()) session.metrics.durations.push(Date.now() - started);
         }
       }
       if (!isCurrent()) return;
+      publish(entries);
+      const recoverIds = new Set(failures.filter(failure => failure.recoverLayout).map(failure => failure.id));
+      if (recoverIds.size) {
+        const recovery = await recoverLayout(blocks.filter(block => recoverIds.has(block.id)), language,
+          this.config.termMatcher, (prompt, data) => attemptRequest(usage => requestWebModel([
+            { role: 'system', content: prompt }, { role: 'user', content: JSON.stringify(data) },
+          ], this.config, controller.signal, usage)));
+        if (!isCurrent()) return;
+        publish(recovery.entries);
+        failures = failures.filter(failure => !recoverIds.has(failure.id))
+          .concat(recovery.failures.map(({ id, error }) => ({ id, ...translationDiagnostic(error, timedOut) })));
+      }
       const current = new Map(session.blocks.map(block => [block.id, sourceKey(block)]));
-      const valid = [];
       if (failures.length) {
         session.metrics.failures++;
         for (const failure of failures) {
@@ -462,17 +481,6 @@ export class BrowserSessions {
         }
         session.translationError = '部分段落未完成，可点击重试。';
       }
-      for (const entry of entries) {
-        const key = sourceKey(entry);
-        const cached = { text: entry.text, parts: entry.parts?.map(part => part.text) };
-        session.cache.set(`${language}:${key}`, cached);
-        if (session.cache.size > 6000) session.cache.delete(session.cache.keys().next().value);
-        if (current.get(entry.id) !== key) continue;
-        const translated = this.entry(entry, cached);
-        session.translations.set(entry.id, translated); session.failed.delete(entry.id); valid.push(translated);
-      }
-      if (valid.length && session.metrics.firstTranslationMs === null) session.metrics.firstTranslationMs = Date.now() - session.metrics.started;
-      if (valid.length) this.send(session, 'translations', { epoch, language, entries: valid });
       if (!session.failed.size) session.translationError = '';
     } catch (error) {
       if (isCurrent()) {

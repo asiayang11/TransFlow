@@ -82,7 +82,8 @@ test('protected paragraph output is immutable and Ark thinking switch is provide
  const block={id:1,source:'Use fetch()',context:'',segments:[{id:1,source:'Use ',protected:false},{id:2,source:'fetch()',protected:true}]};
  const items=[{id:1,segments:[{text:'使用 ',protected:false},{text:'fetch()',protected:true}]}];
  assert.equal(parseTranslations(JSON.stringify({items}),[block])[0].parts[0].text,'使用 ');
- items[0].segments[1].text='mutated()';assert.throws(()=>parseTranslations(JSON.stringify({items}),[block]),/受保护/);
+ items[0].segments[1].text='mutated()';
+ assert.deepEqual(parseTranslations(JSON.stringify({items}),[block])[0].parts,[{id:1,source:'Use ',text:'使用 '}]);
  assert.deepEqual(modelOptions({base:'https://ark.cn-beijing.volces.com/api/v3'}),{thinking:{type:'disabled'}});
  assert.deepEqual(modelOptions({base:'https://ark.cn-beijing.volces.com/api/v3',thinking:'default'}),{});
  assert.deepEqual(modelOptions({base:'https://other.example/v1'}),{});
@@ -122,19 +123,33 @@ test('term protection matches complete names and restores names split by inline 
   assert.throws(() => parseExtraTerms('Kafka,Avro'), /TRANSFLOW_WEB_KEEP_TERMS/);
 });
 
-test('web translation retries only the paragraph that breaks term protection', async t => {
+test('web translation recovers only bad blocks and restores original inline structure', async t => {
   const calls = [];
   t.mock.method(globalThis, 'fetch', async (_url, options) => {
-    const items = JSON.parse(JSON.parse(options.body).messages[1].content).items;
+    const input = JSON.parse(JSON.parse(options.body).messages[1].content);
+    if (input.contexts) {
+      calls.push(input.contexts.map(context => context.id));
+      assert.deepEqual(input.items.map(item => item.text), ['The', 'development team uses', 'to send', 'messages.', 'Big Data']);
+      // Simulate a second malformed response with one missing fragment.
+      const texts = ['', '开发团队使用', '发送', '消息。'];
+      const items = input.items.slice(0, 4).map(({ id }, index) => ({ id, text: texts[index] }));
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ items }) } }] });
+    }
+    if (!input.items) {
+      assert.equal(input.text, 'Big Data');
+      calls.push(['plain']);
+      return Response.json({ choices: [{ message: { content: '大数据' } }] });
+    }
+    const { items } = input;
     calls.push(items.map(item => item.id));
     const results = items.map(item => {
       if (item.segments) {
+        if (item.id === 6) return { id: 6, text: '误译的主题标签' };
+        if (item.id === 8) return { id: 8, segments: [] };
         assert.deepEqual(item.segments.map(slot => slot.text), [
           'The [[TF_TERM_1]] development team uses ', 'TrackerProducer', ' to send [[TF_TERM_2]] messages.',
         ]);
-        return { id: item.id, translations: calls.length === 1
-          ? ['卡夫卡开发团队使用 ', '发送 Kafka 消息。']
-          : ['[[TF_TERM_1]] 开发团队使用 ', ' 发送 [[TF_TERM_2]] 消息。'] };
+        return { id: item.id, translations: ['卡夫卡开发团队使用 ', '发送 Kafka 消息。'] };
       }
       if (item.id === 5) {
         assert.equal(item.text, '[[TF_TERM_1]] as a Service at [[TF_TERM_2]]');
@@ -158,12 +173,18 @@ test('web translation retries only the paragraph that breaks term protection', a
     { id: 1, source: segments.map(slot => slot.source).join(''), context: '', segments },
     { id: 4, source: 'An ordinary paragraph', context: '' },
     { id: 5, source: 'Kafka as a Service at LinkedIn', context: '', attribute: 'alt', nodeId: 10 },
+    { id: 6, source: 'Kafka, ', context: '', segments: [
+      { id: 6, source: 'Kafka', protected: false }, { id: 7, source: ', ', protected: true },
+    ] },
+    { id: 8, source: 'Big Data, ', context: '', segments: [
+      { id: 8, source: 'Big Data', protected: false }, { id: 9, source: ', ', protected: true },
+    ] },
   ];
   const session = { epoch: 'doc', language: 'zh-CN', blocks, metrics: manager.newMetrics(),
     resourceFailures: new Map(), cache: new Map(), translations: new Map(), failed: new Map(),
     pending: new Set(), clients: new Set(), sequence: 0, workers: 0 };
   await manager.translate(session, blocks);
-  assert.deepEqual(calls, [[1, 4, 5], [1]]);
+  assert.deepEqual(calls, [[1, 4, 5, 6, 8], [1, 8], ['plain']]);
   const paragraph = session.translations.get(1);
   assert.deepEqual(paragraph.parts.map(part => [part.id, part.text]), [
     [1, 'Kafka 开发团队使用 '], [3, ' 发送 Kafka 消息。'],
@@ -171,6 +192,9 @@ test('web translation retries only the paragraph that breaks term protection', a
   assert.equal(paragraph.guards[1].source, 'TrackerProducer');
   assert.equal(session.translations.get(5).text, 'LinkedIn 的 Kafka 即服务');
   assert.equal(session.translations.get(4).text, '普通段落');
+  assert.equal(session.translations.get(6).parts[0].text, 'Kafka');
+  assert.equal(session.translations.get(8).parts[0].text, '大数据');
+  assert.equal(session.translations.get(8).guards[1].source, ', ');
   assert.equal(session.failed.size, 0);
 });
 

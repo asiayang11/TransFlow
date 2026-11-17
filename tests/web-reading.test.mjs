@@ -21,7 +21,22 @@ test('desktop fitting changes display scale while preserving website breakpoint 
 });
 test('workbench persists semantic reading, fits desktop, inspects and retries one paragraph, switches language and navigates', {timeout:45000},async t=>{
  let invalid=true,backend,browserContext,fixtureBrowser; const calls=[];
- const model=http.createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const request=JSON.parse(raw),items=JSON.parse(request.messages[1].content).items;calls.push(items.map(item=>item.id));const prefix=request.messages[0].content.includes('日本語')?'日: ':'译: ';res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({items:items.map(item=>({id:item.id,...(item.segments?{segments:item.segments.map(segment=>({...segment,text:segment.protected?(invalid&&segment.text==='fetch()'?'mutated()':segment.text):prefix+segment.text}))}:{text:prefix+item.text})}))})}}]}));});
+ const model=http.createServer(async(req,res)=>{
+  let raw='';for await(const chunk of req)raw+=chunk;
+  const request=JSON.parse(raw),input=JSON.parse(request.messages[1].content);
+  const prefix=request.messages[0].content.includes('日本語')?'日: ':'译: ';
+  if(input.items)calls.push(input.items.map(item=>item.id));
+  const content=input.items ? JSON.stringify({items:input.items.map(item=>{
+   if(input.contexts)return {id:item.id,text:''};
+   if(item.segments){
+    const segments=invalid&&item.segments.some(segment=>segment.text==='fetch()') ? []
+      : item.segments.map(segment=>({...segment,text:segment.protected?segment.text:prefix+segment.text}));
+    return {id:item.id,segments};
+   }
+   return {id:item.id,text:prefix+item.text};
+  })}) : '';
+  res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content}}]}));
+ });
  await new Promise(resolve=>model.listen(0,'127.0.0.1',resolve));
  const bundle=await build({stdin:{contents:"import React from 'react';import{createRoot}from'react-dom/client';import Web from './src/WebWorkspace.tsx';window.testRoot=createRoot(document.getElementById('app'));window.testRoot.render(<React.StrictMode><Web/></React.StrictMode>);",resolveDir:process.cwd(),loader:'tsx'},bundle:true,write:false,format:'iife',jsx:'automatic',loader:{'.css':'empty'},define:{'process.env.NODE_ENV':'"development"'}});
  const app=http.createServer((req,res)=>{
@@ -53,8 +68,8 @@ test('workbench persists semantic reading, fits desktop, inspects and retries on
  await noticeButton.click();
  assert.equal(await noticeButton.getAttribute('aria-expanded'),'true');
  await failures.waitFor({state:'visible'});
- assert.match(await failures.innerText(),/MODEL_PROTECTED_CONTENT_CHANGED/);
- assert.match(await failures.innerText(),/模型更改了受保护的/);
+ assert.match(await failures.innerText(),/MODEL_RECOVERY_NO_TEXT/);
+ assert.match(await failures.innerText(),/自动恢复未收到可用的文本译文/);
  await source().locator('summary').press('Escape');
  await until(()=>page.locator('.web-live-shell').evaluate(node=>!node.classList.contains('is-fullscreen-reading')));
  assert.equal(session().id,readingSession,'fullscreen toggles preserve the browser session');

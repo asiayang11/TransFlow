@@ -26,7 +26,16 @@ test('timed out translation keeps original, exposes recovery and accounts succes
 
 test('one invalid paragraph does not discard valid peers or pause the entire page',async t=>{
  let invalid=true;
- const model=http.createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;const items=JSON.parse(JSON.parse(raw).messages[1].content).items;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({items:items.map(item=>item.segments?{id:item.id,segments:item.segments.map(segment=>({...segment,text:segment.protected?(invalid?'altered()':segment.text):'使用 '}))}:{id:item.id,text:'有效译文'})})}}]}));});
+ const model=http.createServer(async(req,res)=>{
+  let raw='';for await(const chunk of req)raw+=chunk;
+  const input=JSON.parse(JSON.parse(raw).messages[1].content);
+  const content=input.items ? JSON.stringify({items:input.items.map(item=>{
+   if(input.contexts)return {id:item.id,text:''};
+   if(item.segments)return {id:item.id,segments:invalid ? [] : item.segments.map(segment=>({...segment,text:segment.protected?segment.text:'使用 '}))};
+   return {id:item.id,text:'有效译文'};
+  })}) : '';
+  res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content}}]}));
+ });
  await new Promise(resolve=>model.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>model.close(resolve)));
  const directory=await mkdtemp(join(tmpdir(),'transflow-web-diagnostics-'));
  t.after(()=>rm(directory,{recursive:true,force:true}));
@@ -37,7 +46,7 @@ test('one invalid paragraph does not discard valid peers or pause the entire pag
  await manager.translate(session,blocks);
  assert.equal(session.translations.get(1).text,'有效译文');assert.equal(session.translations.has(2),false);assert.equal(session.failed.size,1);assert.notEqual(session.translationPaused,true);assert.match(session.translationError,/部分段落/);
  const error=manager.status(session).blocks[1].error;
- assert.equal(error.code,'MODEL_PROTECTED_CONTENT_CHANGED');
+ assert.equal(error.code,'MODEL_RECOVERY_NO_TEXT');
  assert.equal(error.preview,'Use fetch()');
  await logger.flush();
  const log=JSON.parse(await readFile(join(directory,'translation-errors.jsonl'),'utf8'));

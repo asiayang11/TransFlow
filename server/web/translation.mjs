@@ -7,12 +7,20 @@ export const sourceKey = block => createHash('sha256').update(JSON.stringify([TE
 const defaultTermMatcher = createTermMatcher();
 
 const formatError = (code, message) => new WebTranslationError(code, message, { format: true });
-function envelope(content, blocks) {
+function envelope(content, blocks, { partial = false } = {}) {
   let result;
   try { result = JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')); }
   catch { throw formatError('MODEL_INVALID_JSON', '模型返回的译文不是有效的 JSON。'); }
   const ids = new Set(blocks.map(block => block.id));
-  if (!Array.isArray(result?.items) || result.items.length !== blocks.length || result.items.some(item => !ids.has(item?.id))) throw formatError('MODEL_BLOCK_MISMATCH', '模型返回的文本块数量或编号与请求不一致。');
+  if (!Array.isArray(result?.items)) throw formatError('MODEL_BLOCK_MISMATCH', '模型返回的文本块数量或编号与请求不一致。');
+  if (partial) {
+    const byId = new Map();
+    for (const item of result.items) {
+      if (ids.has(item?.id)) byId.set(item.id, byId.has(item.id) ? null : item);
+    }
+    return byId;
+  }
+  if (result.items.length !== blocks.length || result.items.some(item => !ids.has(item?.id))) throw formatError('MODEL_BLOCK_MISMATCH', '模型返回的文本块数量或编号与请求不一致。');
   const byId = new Map(result.items.map(item => [item.id, item]));
   if (byId.size !== blocks.length) throw formatError('MODEL_DUPLICATE_BLOCK', '模型返回了重复的文本块编号。');
   return byId;
@@ -36,11 +44,14 @@ function parseItem(item, block) {
     if (Array.isArray(item.segments) && item.segments.length === block.segments.length && item.segments.every(segment => segment && !Object.hasOwn(segment, 'id'))) {
       item.segments = item.segments.flatMap((segment, index) => {
         const original = block.segments[index];
-        // Whitespace returned by the model is discarded; immutable source slots
-        // are retained in the DOM. Reject changed code/numbers, not trim noise.
-        if (segment.protected !== original.protected || (original.protected && original.source.trim() && (typeof segment.text !== 'string' || segment.text.trim() !== original.source.trim()))) throw formatError('MODEL_PROTECTED_CONTENT_CHANGED', '模型更改了受保护的代码、标点或节点标记。');
+        // The flags establish alignment. Only editable text is read from the
+        // response; immutable source slots stay in the DOM.
+        if (segment.protected !== original.protected) throw formatError('MODEL_SEGMENT_MISMATCH', '模型返回的行内节点顺序或类型与原段落不一致。');
         return original.protected ? [] : [{ id: original.id, text: segment.text }];
       });
+    } else if (Array.isArray(item.segments) && item.segments.length === editable.length &&
+      item.segments.every(segment => segment?.protected === false && !Object.hasOwn(segment, 'id'))) {
+      item.segments = item.segments.map(({ text }, index) => ({ id: editable[index].id, text }));
     }
     if (Array.isArray(item.translations)) item.segments = item.translations.map((text, index) => ({ id: editable[index]?.id, text }));
     if (!Array.isArray(item.segments) || item.segments.length !== editable.length || item.segments.some(segment => !segment || typeof segment !== 'object')) throw formatError('MODEL_SEGMENT_MISMATCH', '模型返回的行内节点数量或结构与原段落不一致。');
@@ -111,12 +122,17 @@ export async function translateBatch(blocks, language, config, signal, onUsage) 
           return { id, text: source.trim(), context };
         }) }) },
   ], config, signal, onUsage);
-  const byId = envelope(content, blocks);
+  const byId = envelope(content, blocks, { partial: true });
   const entries = []; entries.failures = [];
-  for (const [index, { input, restore }] of prepared.entries()) {
-    try { entries.push(restore(parseItem(byId.get(input.id), input))); }
+  for (const { input, restore } of prepared) {
+    try {
+      const item = byId.get(input.id);
+      if (item === null) throw formatError('MODEL_DUPLICATE_BLOCK', '模型返回了重复的文本块编号。');
+      if (!item) throw formatError('MODEL_BLOCK_MISMATCH', '模型遗漏了该文本块。');
+      entries.push(restore(parseItem(item, input)));
+    }
     catch (error) {
-      entries.failures.push({ id: input.id, ...translationDiagnostic(error), retryTerm: input !== blocks[index] });
+      entries.failures.push({ id: input.id, ...translationDiagnostic(error), recoverLayout: error.format === true });
     }
   }
   return entries;
