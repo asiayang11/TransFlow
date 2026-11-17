@@ -58,6 +58,7 @@
       // Bound individual requests without splitting a sentence across workers.
       if (source.length > 6000 || segments.length > 80) continue;
       blocks.push({ id: editable[0].id, elementId: record.mirror.getId(group), source, context: '', segments,
+        heading: /^H[1-6]$/.test(group.tagName),
         viewport: rect.bottom > 0 && rect.top < innerHeight,
         priority: Math.abs(rect.top - innerHeight / 2) });
     }

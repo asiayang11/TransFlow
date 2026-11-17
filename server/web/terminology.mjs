@@ -1,4 +1,4 @@
-export const TERM_POLICY_VERSION = 1;
+export const TERM_POLICY_VERSION = 2;
 
 const defaultTerms = [
   'Apache Kafka', 'Kafka', 'Apache Samza', 'Samza', 'Apache Hadoop', 'Hadoop',
@@ -32,7 +32,14 @@ class TermProtectionError extends Error {
 }
 
 export function protectTerms(block, matcher) {
-  const matches = [...block.source.matchAll(matcher)];
+  const matches = [...block.source.matchAll(matcher)].map(match => ({
+    start: match.index, end: match.index + match[0].length,
+  }));
+  // Explicit rules win when automatic candidates overlap them.
+  for (const span of block.termSpans ?? []) {
+    if (!matches.some(match => match.start < span.end && span.start < match.end)) matches.push(span);
+  }
+  matches.sort((left, right) => left.start - right.start);
   if (!matches.length) return { input: block, restore: entry => entry };
 
   let prefix = '[[TF_TERM_';
@@ -52,15 +59,15 @@ export function protectTerms(block, matcher) {
     const markers = new Map();
     while (matchIndex < matches.length) {
       const match = matches[matchIndex];
-      if (match.index >= offset) break;
-      const end = match.index + match[0].length;
+      const { start: matchStart, end } = match;
+      if (matchStart >= offset) break;
       if (end > start) {
-        const from = Math.max(match.index - start, 0);
+        const from = Math.max(matchStart - start, 0);
         const to = Math.min(end - start, slot.source.length);
         const marker = `${prefix}${++nextMarker}]]`;
         markers.set(marker, {
           original: slot.source.slice(from, to),
-          atStart: match.index < start,
+          atStart: matchStart < start,
           atEnd: end > offset,
         });
         masked += slot.source.slice(cursor, from) + marker;

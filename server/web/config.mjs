@@ -8,5 +8,5 @@ export async function loadWebConfig() {
   }
   const price = value => value?.trim() && Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null;
   const termMatcher = createTermMatcher(parseExtraTerms(process.env.TRANSFLOW_WEB_KEEP_TERMS));
-  return { termMatcher, thinking: process.env.TRANSFLOW_WEB_THINKING || 'disabled', inputPrice: price(process.env.TRANSFLOW_WEB_INPUT_USD_PER_MILLION), outputPrice: price(process.env.TRANSFLOW_WEB_OUTPUT_USD_PER_MILLION), key: process.env.OPENAI_API_KEY || '', model: process.env.OPENAI_MODEL || 'gpt-4o-mini', base: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', mode: process.env.TRANSFLOW_LLM_MODE || 'openai' };
+  return { termMatcher, autoTerms: process.env.TRANSFLOW_WEB_AUTO_TERMS !== 'false', thinking: process.env.TRANSFLOW_WEB_THINKING || 'disabled', inputPrice: price(process.env.TRANSFLOW_WEB_INPUT_USD_PER_MILLION), outputPrice: price(process.env.TRANSFLOW_WEB_OUTPUT_USD_PER_MILLION), key: process.env.OPENAI_API_KEY || '', model: process.env.OPENAI_MODEL || 'gpt-4o-mini', base: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', mode: process.env.TRANSFLOW_LLM_MODE || 'openai' };
 }

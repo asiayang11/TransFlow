@@ -3,13 +3,18 @@ import { chromium } from 'playwright';
 import { readFile } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { parsePublicUrl, publicAddress, publicFetch, createPublicProxy } from './network.mjs';
-import { LANGUAGES, sourceKey, translateBatch } from './translation.mjs';
+import { LANGUAGES, requestWebModel, sourceKey, translateBatch } from './translation.mjs';
+import { discoverTermSpans, termWindow } from './term-discovery.mjs';
 
 const recorder = await readFile(new URL('../../node_modules/@rrweb/record/dist/record.umd.cjs', import.meta.url), 'utf8');
 const scrollInstrumentation = `window.__transflowReadAnchor = ${readScrollAnchor.toString()};\n`;
 const instrumentation = await readFile(new URL('./recorder.js', import.meta.url), 'utf8');
 const digest = text => createHash('sha256').update(text).digest('hex');
 const allowedAsset = type => /^(image\/|font\/|text\/css|application\/(?:font|x-font|vnd.ms-fontobject|octet-stream))/.test(type);
+const termScope = session => JSON.stringify([session.epoch, session.language, session.generation, session.url?.split('#')[0]]);
+const termBlockKey = block => `${block.id}:${sourceKey(block)}`;
+const foregroundFirst = session => (left, right) =>
+  Number(session.priorityBlocks?.has(right.id) || false) - Number(session.priorityBlocks?.has(left.id) || false);
 
 export class BrowserSessions {
   constructor(config, { prepareContext = async () => {} } = {}) { this.config = config; this.sessions = new Map(); this.prepareContext = prepareContext; }
@@ -106,7 +111,12 @@ export class BrowserSessions {
       else client.write(message);
     }
   }
-  newMetrics() { return { started: Date.now(), captureMs: null, firstTranslationMs: null, viewportMs: null, requests: 0, failures: 0, failedRequests: 0, usageReports: 0, inputTokens: 0, outputTokens: 0, cacheHits: 0, durations: [] }; }
+  newMetrics() { return { started: Date.now(), captureMs: null, firstTranslationMs: null, viewportMs: null, requests: 0, failures: 0, failedRequests: 0, usageReports: 0, inputTokens: 0, outputTokens: 0, cacheHits: 0, durations: [], termRequests: 0, termReviewRequests: 0, termFailures: 0, termPlanFallbacks: 0, termWaitMs: 0 }; }
+  recordUsage(metrics, usage) {
+    if (usage.reported) metrics.usageReports++;
+    metrics.inputTokens += usage.input;
+    metrics.outputTokens += usage.output;
+  }
   entry(block, cached) {
     return { id: block.id, nodeId: block.nodeId, attribute: block.attribute, source: block.source, key: sourceKey(block), text: cached.text,
       parts: block.segments?.filter(part => !part.protected).map((part, index) => ({ ...part, text: cached.parts[index] })),
@@ -237,6 +247,64 @@ export class BrowserSessions {
     session.resourceFailures.delete(key);
     return asset.type.startsWith('text/css') ? { ...asset, body: Buffer.from(this.css(session, asset.body.toString(), url)) } : asset;
   }
+  async planTermWindow(session, blocks, title) {
+    const scope = termScope(session);
+    if (session.termPlan?.scope !== scope) session.termPlan = { scope, spans: new Map(), known: new Set() };
+    const { spans: plan, known } = session.termPlan;
+    if (session.translationPaused || session.workers >= 2) return plan;
+    const missing = blocks.filter(block => !plan.has(termBlockKey(block))).sort(foregroundFirst(session));
+    const window = termWindow(missing);
+    if (!window.length) return plan;
+
+    const metrics = session.metrics;
+    const isCurrent = () => !session.closed && termScope(session) === scope && session.metrics === metrics;
+    const controller = new AbortController();
+    session.controllers ||= new Set();
+    session.controllers.add(controller);
+    const timeout = setTimeout(() => controller.abort(), this.config.termTimeoutMs ?? 8000);
+    const started = Date.now();
+    let spans;
+    let calls = 0;
+    try {
+      spans = await discoverTermSpans(window, {
+        title: title.slice(0, 250),
+        headings: blocks.filter(block => block.heading).slice(0, 8).map(block => block.source.slice(0, 160)),
+        knownNames: [...known],
+      }, session.language, async (prompt, data) => {
+        if (!isCurrent() || controller.signal.aborted) throw new Error('术语识别已结束。');
+        metrics.requests++;
+        metrics.termRequests++;
+        if (calls++) metrics.termReviewRequests++;
+        try {
+          return await requestWebModel([{ role: 'system', content: prompt },
+            { role: 'user', content: JSON.stringify(data) }], this.config, controller.signal,
+          usage => { if (isCurrent()) this.recordUsage(metrics, usage); });
+        } catch (error) {
+          if (isCurrent()) { metrics.termFailures++; metrics.failedRequests++; }
+          throw error;
+        }
+      });
+    } catch {
+      if (isCurrent()) metrics.termPlanFallbacks++;
+    } finally {
+      clearTimeout(timeout);
+      session.controllers.delete(controller);
+    }
+
+    if (!isCurrent()) return null;
+    metrics.termWaitMs += Date.now() - started;
+    // A timed-out or malformed plan should never block the translation queue.
+    for (const block of window) {
+      const confirmed = spans?.get(block.id) ?? [];
+      plan.set(termBlockKey(block), confirmed);
+      for (const { start, end } of confirmed) if (known.size < 48) known.add(block.source.slice(start, end));
+    }
+    if (plan.size > 6000) {
+      const liveKeys = new Set(blocks.map(termBlockKey));
+      for (const key of plan.keys()) if (!liveKeys.has(key)) plan.delete(key);
+    }
+    return plan;
+  }
   async scan(session) {
     if (session.closed || session.scanning || !session.epoch) return;
     session.scanning = true;
@@ -246,13 +314,28 @@ export class BrowserSessions {
       if (!session.loading && !captured.blocks.length && !session.events.some(event => event.type === 2)) session.error = '网页未能生成可显示的内容，请重新载入或尝试其他网址。';
       if (!session.loading && !captured.visual) session.error = '该网页没有可显示的内容，请重新载入或尝试其他网址。';
       else if (session.error === '该网页没有可显示的内容，请重新载入或尝试其他网址。') session.error = '';
-      session.blocks = captured.blocks; session.title = captured.title;
+      const useAutoTerms = this.config.autoTerms && this.config.mode !== 'mock' &&
+        !!this.config.key && this.config.key !== 'sk-your-key-here';
+      const termPlan = useAutoTerms ? await this.planTermWindow(session, captured.blocks, captured.title) : undefined;
+      if (termPlan === null || session.closed || captured.epoch !== session.epoch) return;
+      const plannedIds = new Set();
+      session.blocks = termPlan ? captured.blocks.map(block => {
+        const spans = termPlan.get(termBlockKey(block));
+        if (spans) plannedIds.add(block.id);
+        return spans?.length ? { ...block, termSpans: spans } : block;
+      }) : captured.blocks;
+      session.title = captured.title;
       const current = new Map(session.blocks.map(block => [block.id, sourceKey(block)]));
       for(const id of session.priorityBlocks || []) if(!current.has(id)||session.translations.has(id)||session.failed.has(id)) session.priorityBlocks.delete(id);
-      for (const [id, entry] of session.translations) if (current.get(id) !== entry.key) session.translations.delete(id);
+      for (const [id, entry] of session.translations) {
+        if (current.get(id) === entry.key) continue;
+        session.translations.delete(id);
+        if (current.has(id)) this.send(session, 'translation-reset', { epoch: session.epoch, language: session.language, id });
+      }
       for (const [id, key] of session.failed) if (current.get(id) !== key) session.failed.delete(id);
       if (!session.failed.size && !session.translationPaused) session.translationError = '';
       for (const block of session.blocks) {
+        if (termPlan && !plannedIds.has(block.id)) continue;
         const key = sourceKey(block), cached = session.cache.get(`${session.language}:${key}`);
         if (cached && !session.translations.has(block.id)) {
           const entry = this.entry(block, cached); session.metrics.cacheHits++;
@@ -262,9 +345,10 @@ export class BrowserSessions {
         }
       }
       const todo = session.blocks.filter(block => {
+        if (termPlan && !plannedIds.has(block.id)) return false;
         const key = sourceKey(block);
         return session.translations.get(block.id)?.key !== key && !session.pending.has(`${session.epoch}:${session.language}:${key}`) && session.failed.get(block.id) !== key;
-      }).sort((a,b) => Number(session.priorityBlocks?.has(b.id) || false) - Number(session.priorityBlocks?.has(a.id) || false));
+      }).sort(foregroundFirst(session));
       // Small first response, then bounded paragraph batches. Deduplicate both
       // within a batch and between workers by source structure, not DOM ID.
       const seen = new Set();
@@ -285,7 +369,9 @@ export class BrowserSessions {
     finally { session.scanning = false; }
   }
   async translate(session, blocks) {
-    const epoch = session.epoch, language = session.language, generation = session.generation || 0;
+    const epoch = session.epoch, language = session.language;
+    const scope = termScope(session), metrics = session.metrics;
+    const isCurrent = () => !session.closed && termScope(session) === scope && session.metrics === metrics;
     session.workers = (session.workers || 0) + 1;
     const identities = blocks.map(block => `${epoch}:${language}:${sourceKey(block)}`);
     identities.forEach(key => session.pending.add(key));
@@ -302,8 +388,9 @@ export class BrowserSessions {
         const started = Date.now(); session.metrics.requests++;
         try {
           const result = await translateBatch(requested, language, this.config, controller.signal, usage => {
-            if (epoch === session.epoch && generation === (session.generation || 0)) { if (usage.reported) session.metrics.usageReports++; session.metrics.inputTokens += usage.input; session.metrics.outputTokens += usage.output; }
+            if (isCurrent()) this.recordUsage(metrics, usage);
           });
+          if (!isCurrent()) return;
           entries.push(...result);
           if (result.failures.length) session.metrics.failedRequests++;
           if (retryingTerms) {
@@ -321,15 +408,16 @@ export class BrowserSessions {
           break;
         }
         catch (error) {
-          if (!session.closed && epoch === session.epoch && generation === (session.generation || 0) && (!controller.signal.aborted || timedOut)) session.metrics.failedRequests++;
+          if (!isCurrent()) return;
+          if (!controller.signal.aborted || timedOut) session.metrics.failedRequests++;
           if (retryingTerms) break;
           if (attempt || controller.signal.aborted || /鉴权|配置|mock/.test(error.message)) throw error;
           if (/限流|HTTP 5/.test(error.message)) await new Promise(resolve => { const timer = setTimeout(resolve, 1000); controller.signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); });
         } finally {
-          if (!session.closed && epoch === session.epoch && generation === (session.generation || 0)) session.metrics.durations.push(Date.now() - started);
+          if (isCurrent()) session.metrics.durations.push(Date.now() - started);
         }
       }
-      if (session.closed || epoch !== session.epoch || language !== session.language || generation !== (session.generation || 0)) return;
+      if (!isCurrent()) return;
       const current = new Map(session.blocks.map(block => [block.id, sourceKey(block)]));
       const valid = [];
       if (failures.length) {
@@ -354,7 +442,7 @@ export class BrowserSessions {
       if (valid.length) this.send(session, 'translations', { epoch, language, entries: valid });
       if (!session.failed.size) session.translationError = '';
     } catch (error) {
-      if (!session.closed && epoch === session.epoch && language === session.language && generation === (session.generation || 0)) {
+      if (isCurrent()) {
         session.metrics.failures++; session.translationPaused = error.code !== 'TRANSLATION_FORMAT';
         session.translationError = controller.signal.aborted ? '翻译请求超时，可点击重试。' : error.message.includes('模型') || error.message.includes('翻译') || error.message.includes('.env') || error.message.includes('mock') ? error.message : '无法连接翻译服务，请检查模型配置和网络后重试。';
         for (const block of blocks) session.failed.set(block.id, sourceKey(block));

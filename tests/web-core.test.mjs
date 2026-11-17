@@ -4,6 +4,7 @@ import { parsePublicUrl, isPublicAddress, publicAddress, pinnedLookup } from '..
 import { parseTranslations, sourceKey, modelOptions } from '../server/web/translation.mjs';
 import { BrowserSessions } from '../server/web/sessions.mjs';
 import { createTermMatcher, parseExtraTerms, protectTerms } from '../server/web/terminology.mjs';
+import { discoverTermSpans } from '../server/web/term-discovery.mjs';
 
 test('URL policy rejects credentials, special protocols and nonstandard ports', () => {
   for (const url of ['file:///etc/passwd', 'javascript:alert(1)', 'ftp://example.com', 'https://user:pass@example.com', 'http://example.com:8787']) assert.throws(() => parsePublicUrl(url));
@@ -137,7 +138,10 @@ test('web translation retries only the paragraph that breaks term protection', a
       }
       if (item.id === 5) {
         assert.equal(item.text, '[[TF_TERM_1]] as a Service at [[TF_TERM_2]]');
-        return { id: item.id, text: '[[TF_TERM_2]] 的 [[TF_TERM_1]] 即服务' };
+        return { id: item.id, segments: [
+          { text: '[[TF_TERM_2]]', protected: true }, { text: ' 的 ', protected: false },
+          { text: '[[TF_TERM_1]]', protected: true }, { text: ' 即服务', protected: false },
+        ] };
       }
       return { id: item.id, text: '普通段落' };
     });
@@ -168,4 +172,83 @@ test('web translation retries only the paragraph that breaks term protection', a
   assert.equal(session.translations.get(5).text, 'LinkedIn 的 Kafka 即服务');
   assert.equal(session.translations.get(4).text, '普通段落');
   assert.equal(session.failed.size, 0);
+});
+
+test('automatic discovery checks source occurrences and reviews only ambiguous candidates', async () => {
+  const blocks = [{ id: 1, source: 'Apple introduced the LumaQuill toolkit. Apple is a supplier here. An apple is a fruit.' }];
+  const page = { title: 'Developer tools', headings: ['Introducing LumaQuill'] };
+  let calls = 0;
+  const spans = await discoverTermSpans(blocks, page, 'zh-CN', async (_prompt, input) => {
+    if (calls++ === 0) {
+      assert.deepEqual(input.blocks, [{ id: 1, text: blocks[0].source }]);
+      return JSON.stringify({ candidates: [
+        { id: 1, text: 'LumaQuill', occurrence: 'all', decision: 'keep' },
+        { id: 1, text: 'Apple', occurrence: 1, decision: 'review' },
+        { id: 1, text: 'apple', occurrence: 1, decision: 'review' },
+        { id: 1, text: 'Quill', occurrence: 1, decision: 'keep' },
+        { id: 1, text: 'invented name', occurrence: 'all', decision: 'keep' },
+        { id: 99, text: 'Apple', occurrence: 1, decision: 'keep' },
+      ] });
+    }
+    assert.deepEqual(input.candidates.map(candidate => candidate.term), ['Apple', 'apple']);
+    assert.match(input.candidates[1].after, /is a fruit/);
+    return JSON.stringify({ decisions: [
+      { key: input.candidates[0].key, decision: 'keep' },
+      { key: input.candidates[1].key, decision: 'translate' },
+    ] });
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(spans.get(1).map(({ start, end }) => [start, blocks[0].source.slice(start, end)]),
+    [[0, 'Apple'], [21, 'LumaQuill']]);
+  const unavailable = await discoverTermSpans(blocks, page, 'zh-CN', async (_prompt, input) => {
+    if (input.candidates) throw new Error('review timed out');
+    return JSON.stringify({ candidates: [
+      { id: 1, text: 'LumaQuill', occurrence: 1, decision: 'keep' },
+      { id: 1, text: 'apple', occurrence: 1, decision: 'review' },
+    ] });
+  });
+  assert.deepEqual(unavailable.get(1), [{ start: 21, end: 30 }]);
+});
+
+test('the web queue uses automatic spans, then replans when the page URL changes', async t => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    const input = JSON.parse(JSON.parse(options.body).messages[1].content);
+    calls.push(input);
+    const result = input.blocks ? { candidates: input.title === 'Toolkit'
+      ? [{ id: 1, text: 'LumaQuill', occurrence: 1, decision: 'keep' }] : [] }
+      : { items: [{ id: 1, text: input.items[0].text.includes('[[TF_TERM_1]]')
+        ? '使用 [[TF_TERM_1]] 工具包。' : '使用夜光笔工具包。' }] };
+    return Response.json({ choices: [{ message: { content: JSON.stringify(result) } }],
+      usage: { prompt_tokens: 5, completion_tokens: 2 } });
+  });
+  const manager = new BrowserSessions({ key: 'test', model: 'fixture', base: 'https://model.example/v1', autoTerms: true });
+  const block = { id: 1, source: 'Use the LumaQuill toolkit.', context: '', viewport: true };
+  let title = 'Toolkit';
+  const session = { url: 'https://example.com/tools', epoch: 'doc', language: 'zh-CN', blocks: [], metrics: manager.newMetrics(),
+    events: [], resourceFailures: new Map(), cache: new Map(), translations: new Map(), failed: new Map(),
+    pending: new Set(), clients: new Set(), sequence: 0, workers: 0, loading: false,
+    page: { evaluate: async () => ({ epoch: 'doc', blocks: [block], visual: true, title }) } };
+  let jobs = [];
+  const translate = manager.translate.bind(manager);
+  manager.translate = (...args) => jobs.push(translate(...args));
+  const scan = manager.scan.bind(manager);
+  manager.scan = () => {}; // Drive scans explicitly for deterministic assertions.
+  await scan(session);
+  await Promise.all(jobs);
+  assert.equal(session.translations.get(1).text, '使用 LumaQuill 工具包。');
+  assert.equal(calls[1].items[0].text, 'Use the [[TF_TERM_1]] toolkit.');
+  assert.equal(session.metrics.termRequests, 1);
+  assert.equal(session.metrics.inputTokens, 10);
+  await scan(session);
+  assert.equal(calls.length, 2, 'unchanged occurrences reuse the plan');
+
+  jobs = [];
+  title = 'Literary translation';
+  session.url = 'https://example.com/literature';
+  await scan(session);
+  await Promise.all(jobs);
+  assert.deepEqual(calls[2].knownNames, []);
+  assert.equal(calls[3].items[0].text, block.source);
+  assert.equal(session.translations.get(1).text, '使用夜光笔工具包。');
 });
