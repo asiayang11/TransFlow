@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parsePublicUrl, isPublicAddress, publicAddress, pinnedLookup } from '../server/web/network.mjs';
 import { parseTranslations, sourceKey, modelOptions } from '../server/web/translation.mjs';
-import { BrowserSessions } from '../server/web/sessions.mjs';
+import { BrowserSessions, ResourceError } from '../server/web/sessions.mjs';
 import { createTermMatcher, parseExtraTerms, protectTerms } from '../server/web/terminology.mjs';
 import { discoverTermSpans } from '../server/web/term-discovery.mjs';
 
@@ -48,6 +48,25 @@ test('mirror snapshot disables scripts/frames and routes resources through sessi
   assert.match(image.attributes.src,/^\/api\/web\/sessions\//);
   assert.equal(image.attributes.onerror,undefined); assert.equal(image.attributes.srcset,undefined);
   assert.equal(snapshot.data.node.childNodes[0].childNodes[0].childNodes[0].tagName,'script');
+});
+
+test('redirected stylesheet is reused with the final base URL even after an origin miss', async () => {
+  const manager = new BrowserSessions({});
+  const session = { id: 'a'.repeat(48), url: 'https://example.com/', assetUrls: new Map(), assets: new Map(),
+    assetAliases: new Map(), assetBytes: 0, resourceFailures: new Map() };
+  const original = 'https://example.com/styles.css';
+  const final = 'https://example.com/cdn/v2/styles.css';
+  const key = manager.assetUrl(session, original).split('/').at(-1);
+  session.resourceFailures.set(key, new ResourceError(404, '源站资源不可用', true));
+  await assert.rejects(manager.asset(session, key), error => error.status === 404 && error.originMissing);
+  const body = Buffer.from('.hero { background: url(./hero.png) }');
+  manager.cacheAsset(session, final, { url: final, body, type: 'text/css' }, [original]);
+  const asset = await manager.asset(session, key);
+  const urlKey = asset.body.toString().match(/assets\/([a-f0-9]{64})/)[1];
+  assert.equal(session.assetUrls.get(urlKey), 'https://example.com/cdn/v2/hero.png');
+  assert.equal(session.assets.size, 1);
+  assert.equal(session.assetBytes, body.length);
+  assert.equal(session.resourceFailures.size, 0);
 });
 test('iframe document mutations are dropped without clearing the main mirror document', () => {
   const manager = new BrowserSessions({});

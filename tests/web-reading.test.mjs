@@ -56,7 +56,7 @@ test('workbench persists semantic reading, fits desktop, inspects and retries on
  assert.equal(await session().page.evaluate(()=>innerWidth),1280);
  assert.equal(await page.locator('.mirror-root').first().evaluate(node=>node.style.zoom),'0.5');
  const readingSession=session().id;
- session().resourceFailures.set('fixture',true);
+ session().resourceFailures.set('fixture',{status:404,originMissing:true});
  backend.sessions.status(session());
  await page.getByRole('button',{name:'全屏阅读',exact:true}).click();
  assert.equal(await page.locator('.web-live-shell').evaluate(node=>node.classList.contains('is-fullscreen-reading')),true);
@@ -67,6 +67,8 @@ test('workbench persists semantic reading, fits desktop, inspects and retries on
  assert.equal(await failures.isVisible(),false);
  await noticeButton.click();
  assert.equal(await noticeButton.getAttribute('aria-expanded'),'true');
+ await page.getByText('源站有 1 项图片、字体或样式已不可用（HTTP 404/410）。').waitFor({state:'visible'});
+ assert.equal(await page.getByRole('button',{name:'重试资源'}).count(),0);
  const failure = [...session().failed.values()][0];
  const savedError = failure.error;
  failure.error = undefined;

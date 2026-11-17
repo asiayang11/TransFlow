@@ -2,7 +2,7 @@ import http from 'node:http';
 import { loadWebConfig } from './config.mjs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
-import { BrowserSessions } from './sessions.mjs';
+import { BrowserSessions, ResourceError } from './sessions.mjs';
 import { createFailureLogger } from './diagnostics.mjs';
 
 export async function startWebServer({ port, config, origins, prepareContext, logFailure } = {}) {
@@ -48,7 +48,21 @@ export async function startWebServer({ port, config, origins, prepareContext, lo
       }
       if (match[2] === 'assets' && request.method === 'GET') {
         let asset;
-        try { asset = await sessions.asset(session, match[3]); } catch (error) { session.resourceFailures.set(match[3], true); sessions.status(session); throw error; }
+        const key = match[3];
+        const epoch = session.epoch;
+        const hadFailure = session.resourceFailures.has(key);
+        try {
+          asset = await sessions.asset(session, key);
+        } catch (error) {
+          const failure = error instanceof ResourceError ? error : new ResourceError(502, '无法连接源站获取资源。');
+          if (session.epoch === epoch && session.assetUrls.has(key)) {
+            const previous = session.resourceFailures.get(key);
+            session.resourceFailures.set(key, failure);
+            if (previous?.status !== failure.status || previous?.originMissing !== failure.originMissing) sessions.status(session);
+          }
+          return sendJson(response, failure.status, { error: failure.message });
+        }
+        if (hadFailure && session.epoch === epoch) sessions.status(session);
         response.writeHead(200, { 'Content-Type': asset.type, 'Cache-Control': 'private, max-age=300', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox", 'Referrer-Policy': 'no-referrer' });
         response.end(asset.body); return;
       }

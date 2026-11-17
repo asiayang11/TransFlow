@@ -202,7 +202,9 @@ export default function WebWorkspace() {
     : []);
   const missingDiagnostics = failedBlocks.length - diagnosedBlocks.length;
   const translationWarning = status?.translationError || (failedBlocks.length ? '部分段落未完成，可点击重试。' : '');
-  const noticeCount = Number(!!shownError)+Number(offline)+Number(!!translationWarning)+Number(!!sessionId&&!connected)+Number(!!status?.resourceFailures);
+  const originMissing = status?.originMissingResources ?? 0;
+  const retryableResources = Math.max(0, (status?.resourceFailures ?? 0) - originMissing);
+  const noticeCount = Number(!!shownError)+Number(offline)+Number(!!translationWarning)+Number(!!sessionId&&!connected)+Number(!!originMissing)+Number(!!retryableResources);
 
   return <main className={`app-shell web-demo-shell web-live-shell ${fullscreen?'is-fullscreen-reading':''}`}>
     <AppHeader active="web" />
@@ -237,7 +239,13 @@ export default function WebWorkspace() {
         </ul>}
       </>}
       {sessionId && !connected && <div className="web-service-note web-recovery" role="alert"><span>连接已断开，正在恢复。页面操作暂时暂停。</span><button onClick={() => reconnect.current?.()}>重新连接</button><button onClick={() => void open(url)}>重新打开网址</button></div>}
-      {!!status?.resourceFailures && <div className="web-service-note web-recovery" role="alert"><span>{status.resourceFailures} 项图片、字体或样式未加载，页面可能显示不完整。</span><button onClick={() => sendCommand({ type: 'resources' })}>重试资源</button></div>}
+      {!!originMissing && <div className="web-service-note" role="status">
+        源站有 {originMissing} 项图片、字体或样式已不可用（HTTP 404/410）。
+      </div>}
+      {!!retryableResources && <div className="web-service-note web-recovery" role="alert">
+        <span>{retryableResources} 项图片、字体或样式暂未加载，页面可能显示不完整。</span>
+        <button onClick={() => sendCommand({ type: 'resources' })}>重试资源</button>
+      </div>}
       </div>
       <div className="comparison-controls">
         <div className="sync-controls"><div className="web-history">{[['back','网页后退',ArrowLeft],['forward','网页前进',ArrowRight],['reload','重新载入网页',ArrowsClockwise]].map(([action,label,Icon]) => { const Glyph = Icon as typeof ArrowLeft; return <button key={action as string} className="icon-button" aria-label={label as string} disabled={!sessionId || !connected || opening} onClick={() => navigation(action as string)}><Glyph size={16} /></button>; })}</div><button className={`sync-toggle ${linked ? 'is-linked' : ''}`} role="switch" aria-checked={linked} onClick={() => setLinked(value => !value)}>{linked ? <LinkSimple size={17} /> : <LinkSimpleBreak size={17} />}<span>滚动联动{linked ? '开启' : '关闭'}</span><i aria-hidden="true" /></button></div>

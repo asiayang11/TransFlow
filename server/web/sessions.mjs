@@ -13,6 +13,13 @@ const scrollInstrumentation = `window.__transflowReadAnchor = ${readScrollAnchor
 const instrumentation = await readFile(new URL('./recorder.js', import.meta.url), 'utf8');
 const digest = text => createHash('sha256').update(text).digest('hex');
 const allowedAsset = type => /^(image\/|font\/|text\/css|application\/(?:font|x-font|vnd.ms-fontobject|octet-stream))/.test(type);
+export class ResourceError extends Error {
+  constructor(status, message, originMissing = false) {
+    super(message);
+    this.status = status;
+    this.originMissing = originMissing;
+  }
+}
 const termScope = session => JSON.stringify([session.epoch, session.language, session.generation, session.url?.split('#')[0]]);
 const termBlockKey = block => `${block.id}:${sourceKey(block)}`;
 const foregroundFirst = session => (left, right) =>
@@ -48,7 +55,7 @@ export class BrowserSessions {
     const page = await context.newPage();
     session = { id: randomBytes(24).toString('hex'), context, page, language, epoch: '', sequence: 0,
       events: [], meta: null, clients: new Set(), translations: new Map(), cache: new Map(), failed: new Map(),
-      assets: new Map(), assetBytes: 0, assetPending: new Map(), assetUrls: new Map(), blockedNodes: new Set(), blocks: [], pending: new Set(),
+      assets: new Map(), assetAliases: new Map(), assetBytes: 0, assetPending: new Map(), assetUrls: new Map(), blockedNodes: new Set(), blocks: [], pending: new Set(),
       queue: Promise.resolve(), commands: new Map(), closed: false, lastSeen: Date.now(), loading: true, translationError: '', workers: 0, url, metrics: this.newMetrics(), resourceFailures: new Map() };
     this.sessions.set(session.id, session);
     page.setDefaultTimeout(8000);
@@ -67,7 +74,11 @@ export class BrowserSessions {
     context.on('page', popup => { if (popup !== page) popup.close().catch(() => {}); });
     page.on('response', response => {
       const type = response.headers()['content-type'] || '';
-      if (response.ok() && allowedAsset(type)) response.body().then(body => this.cacheAsset(session, response.url(), { type, body, status: 200 })).catch(() => {});
+      if (!response.ok() || !allowedAsset(type)) return;
+      const aliases = [];
+      for (let request = response.request().redirectedFrom(); request; request = request.redirectedFrom()) aliases.push(request.url());
+      const url = response.url();
+      response.body().then(body => this.cacheAsset(session, url, { type, body, status: 200, url }, aliases)).catch(() => {});
     });
     page.on('framenavigated', frame => {
       if (frame === page.mainFrame() && frame.url() !== 'about:blank') { session.url = frame.url(); this.status(session); }
@@ -158,7 +169,9 @@ export class BrowserSessions {
     const data = { url: session.url, language: session.language, epoch: session.epoch, loading: session.loading,
       total: session.blocks.length, completed, failed, error: session.error || '', translationError: session.translationError,
       blocks,
-      resourceFailures: session.resourceFailures.size, metrics: { ...session.metrics, started: undefined, estimatedCostUsd: session.metrics.usageReports && this.config.inputPrice != null && this.config.outputPrice != null ? (session.metrics.inputTokens * this.config.inputPrice + session.metrics.outputTokens * this.config.outputPrice) / 1000000 : null }, viewport: session.blocks.filter(block => block.viewport).length, viewportCompleted: session.blocks.filter(block => block.viewport && session.translations.has(block.id)).length,
+      resourceFailures: session.resourceFailures.size,
+      originMissingResources: [...session.resourceFailures.values()].filter(failure => failure.originMissing).length,
+      metrics: { ...session.metrics, started: undefined, estimatedCostUsd: session.metrics.usageReports && this.config.inputPrice != null && this.config.outputPrice != null ? (session.metrics.inputTokens * this.config.inputPrice + session.metrics.outputTokens * this.config.outputPrice) / 1000000 : null }, viewport: session.blocks.filter(block => block.viewport).length, viewportCompleted: session.blocks.filter(block => block.viewport && session.translations.has(block.id)).length,
       translating: session.pending.size > 0, title: session.title || '', limited: session.blocks.length >= 3000 };
     this.send(session, 'status', data); return data;
   }
@@ -258,24 +271,35 @@ export class BrowserSessions {
     }
     return event;
   }
-  cacheAsset(session, url, asset) {
-    if (session.closed || !allowedAsset(asset.type) || asset.body.length > 8 * 1024 * 1024 || session.assets.has(url)) return;
-    if (session.assetBytes + asset.body.length > 64 * 1024 * 1024) return;
-    session.assets.set(url, asset); session.assetBytes += asset.body.length;
+  cacheAsset(session, url, asset, aliases = []) {
+    if (session.closed || !allowedAsset(asset.type) || asset.body.length > 8 * 1024 * 1024) return;
+    if (!session.assets.has(url)) {
+      if (session.assetBytes + asset.body.length > 64 * 1024 * 1024) return;
+      session.assets.set(url, asset);
+      session.assetBytes += asset.body.length;
+    }
+    for (const alias of aliases) {
+      if (alias !== url && (session.assetAliases.size < 4000 || session.assetAliases.has(alias))) session.assetAliases.set(alias, url);
+    }
   }
   async asset(session, key) {
     const url = session.assetUrls.get(key);
-    if (!url) throw new Error('资源不存在。');
-    let asset = session.assets.get(url);
+    if (!url) throw new ResourceError(404, '资源不存在。');
+    let asset = session.assets.get(session.assetAliases.get(url) ?? url);
     if (!asset) {
+      const previous = session.resourceFailures.get(key);
+      if (previous?.originMissing) throw previous;
       if (!session.assetPending.has(url)) session.assetPending.set(url, publicFetch(url).then(result => {
-        if (!allowedAsset(result.type) || result.status !== 200) throw new Error('资源不可用。');
-        this.cacheAsset(session, url, result); return result;
+        if (result.status === 404 || result.status === 410) throw new ResourceError(result.status, `源站资源不可用（HTTP ${result.status}）。`, true);
+        if (result.status !== 200) throw new ResourceError(502, `源站资源请求失败（HTTP ${result.status}）。`);
+        if (!allowedAsset(result.type)) throw new ResourceError(415, '源站返回的内容不是可加载的图片、字体或样式。');
+        this.cacheAsset(session, result.url, result, [url]);
+        return result;
       }).finally(() => session.assetPending.delete(url)));
       asset = await session.assetPending.get(url);
     }
     session.resourceFailures.delete(key);
-    return asset.type.startsWith('text/css') ? { ...asset, body: Buffer.from(this.css(session, asset.body.toString(), url)) } : asset;
+    return asset.type.startsWith('text/css') ? { ...asset, body: Buffer.from(this.css(session, asset.body.toString(), asset.url ?? url)) } : asset;
   }
   async planTermWindow(session, blocks, title) {
     const scope = termScope(session);
@@ -528,7 +552,14 @@ export class BrowserSessions {
         session.translations.clear(); session.failed.clear(); session.translationError = ''; session.translationPaused = false;
         this.send(session, 'language', { language: session.language }); this.scan(session); return;
       }
-      if (command.type === 'resources') { session.resourceFailures.clear(); await session.page.evaluate(() => window.__transflow?.record.takeFullSnapshot()); this.status(session); return; }
+      if (command.type === 'resources') {
+        for (const [key, failure] of session.resourceFailures) {
+          if (!failure.originMissing) session.resourceFailures.delete(key);
+        }
+        await session.page.evaluate(() => window.__transflow?.record.takeFullSnapshot());
+        this.status(session);
+        return;
+      }
       if (command.type === 'retry') {
         if (command.id !== undefined) {
           const block = session.blocks.find(block => block.id === command.id);
