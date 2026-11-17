@@ -294,17 +294,35 @@ export class BrowserSessions {
     let timedOut = false;
     const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, this.config.timeoutMs ?? 60000);
     try {
-      let entries;
+      const entries = [];
+      let failures = [];
+      let requested = blocks;
+      let retryingTerms = false;
       for (let attempt = 0; attempt < 2; attempt++) {
         const started = Date.now(); session.metrics.requests++;
         try {
-          entries = await translateBatch(blocks, language, this.config, controller.signal, usage => {
+          const result = await translateBatch(requested, language, this.config, controller.signal, usage => {
             if (epoch === session.epoch && generation === (session.generation || 0)) { if (usage.reported) session.metrics.usageReports++; session.metrics.inputTokens += usage.input; session.metrics.outputTokens += usage.output; }
           });
+          entries.push(...result);
+          if (result.failures.length) session.metrics.failedRequests++;
+          if (retryingTerms) {
+            const succeeded = new Set(result.map(entry => entry.id));
+            failures = failures.filter(failure => !succeeded.has(failure.id));
+          } else {
+            failures = result.failures;
+            const retryIds = new Set(failures.filter(failure => failure.code === 'TERM_PROTECTION').map(failure => failure.id));
+            if (retryIds.size && !attempt && !controller.signal.aborted) {
+              requested = blocks.filter(block => retryIds.has(block.id));
+              retryingTerms = true;
+              continue;
+            }
+          }
           break;
         }
         catch (error) {
           if (!session.closed && epoch === session.epoch && generation === (session.generation || 0) && (!controller.signal.aborted || timedOut)) session.metrics.failedRequests++;
+          if (retryingTerms) break;
           if (attempt || controller.signal.aborted || /鉴权|配置|mock/.test(error.message)) throw error;
           if (/限流|HTTP 5/.test(error.message)) await new Promise(resolve => { const timer = setTimeout(resolve, 1000); controller.signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); });
         } finally {
@@ -314,9 +332,13 @@ export class BrowserSessions {
       if (session.closed || epoch !== session.epoch || language !== session.language || generation !== (session.generation || 0)) return;
       const current = new Map(session.blocks.map(block => [block.id, sourceKey(block)]));
       const valid = [];
-      if (entries.failures?.length) {
-        session.metrics.failedRequests++; session.metrics.failures++;
-        for (const failure of entries.failures) { const block = blocks.find(block => block.id === failure.id); session.failed.set(block.id, sourceKey(block)); }
+      if (failures.length) {
+        session.metrics.failures++;
+        for (const failure of failures) {
+          const block = blocks.find(block => block.id === failure.id);
+          const key = sourceKey(block);
+          if (current.get(block.id) === key) session.failed.set(block.id, key);
+        }
         session.translationError = '部分段落未完成，可点击重试。';
       }
       for (const entry of entries) {

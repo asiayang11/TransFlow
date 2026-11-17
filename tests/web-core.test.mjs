@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { parsePublicUrl, isPublicAddress, publicAddress, pinnedLookup } from '../server/web/network.mjs';
 import { parseTranslations, sourceKey, modelOptions } from '../server/web/translation.mjs';
 import { BrowserSessions } from '../server/web/sessions.mjs';
+import { createTermMatcher, parseExtraTerms, protectTerms } from '../server/web/terminology.mjs';
 
 test('URL policy rejects credentials, special protocols and nonstandard ports', () => {
   for (const url of ['file:///etc/passwd', 'javascript:alert(1)', 'ftp://example.com', 'https://user:pass@example.com', 'http://example.com:8787']) assert.throws(() => parsePublicUrl(url));
@@ -90,4 +91,81 @@ test('protected whitespace stays in the DOM even when model trims its echo', () 
  const block={id:1,source:'Hello  world',context:'',segments:[{id:1,source:'Hello',protected:false},{id:2,source:'  ',protected:true},{id:3,source:'world',protected:false}]};
  const result=parseTranslations(JSON.stringify({items:[{id:1,segments:[{text:'你好',protected:false},{text:'',protected:true},{text:'世界',protected:false}]}]}),[block]);
  assert.deepEqual(result[0].parts.map(part=>part.id),[1,3]);assert.equal(block.segments[1].source,'  ');
+});
+
+test('term protection matches complete names and restores names split by inline markup', () => {
+  const matcher = createTermMatcher(parseExtraTerms('["Acme", "Agent.Mesh"]'));
+  const segments = [
+    { id: 1, source: 'Apache ', protected: false },
+    { id: 2, source: 'Kafka', protected: false },
+    { id: 3, source: ' supports kafka and Agent.Mesh, not AcmeWidget.', protected: false },
+    { id: 4, source: 'TrackerProducer', protected: true },
+  ];
+  const block = { id: 1, source: segments.map(slot => slot.source).join(''), context: '', segments };
+  const { input, restore } = protectTerms(block, matcher);
+  assert.deepEqual(input.segments.map(slot => slot.source), [
+    '[[TF_TERM_1]]', '[[TF_TERM_2]]', ' supports [[TF_TERM_3]] and [[TF_TERM_4]], not AcmeWidget.', 'TrackerProducer',
+  ]);
+  const slots = ['[[TF_TERM_1]]', '[[TF_TERM_2]]', ' 支持 [[TF_TERM_3]] 和 [[TF_TERM_4]]，但不支持 AcmeWidget。'];
+  const translated = parseTranslations(JSON.stringify({ items: [{ id: 1, translations: slots }] }), [input])[0];
+  const restored = restore(translated);
+  assert.deepEqual(restored.parts.map(part => [part.id, part.source, part.text]), [
+    [1, 'Apache ', 'Apache '], [2, 'Kafka', 'Kafka'],
+    [3, segments[2].source, ' 支持 kafka 和 Agent.Mesh，但不支持 AcmeWidget。'],
+  ]);
+  assert.equal(sourceKey(restored), sourceKey(block));
+  for (const bad of ['卡夫卡', '[[TF_TERM_1]][[TF_TERM_1]]', '[[TF_TERM_9]]', '[[TF_TERM_1]][[TF_TERM_X_2]]', '[[TF_TERM_1]] 支持']) {
+    const response = { items: [{ id: 1, translations: [bad, ...slots.slice(1)] }] };
+    assert.throws(() => restore(parseTranslations(JSON.stringify(response), [input])[0]), /专名/);
+  }
+  assert.throws(() => parseExtraTerms('Kafka,Avro'), /TRANSFLOW_WEB_KEEP_TERMS/);
+});
+
+test('web translation retries only the paragraph that breaks term protection', async t => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    const items = JSON.parse(JSON.parse(options.body).messages[1].content).items;
+    calls.push(items.map(item => item.id));
+    const results = items.map(item => {
+      if (item.segments) {
+        assert.deepEqual(item.segments.map(slot => slot.text), [
+          'The [[TF_TERM_1]] development team uses ', 'TrackerProducer', ' to send [[TF_TERM_2]] messages.',
+        ]);
+        return { id: item.id, translations: calls.length === 1
+          ? ['卡夫卡开发团队使用 ', '发送 Kafka 消息。']
+          : ['[[TF_TERM_1]] 开发团队使用 ', ' 发送 [[TF_TERM_2]] 消息。'] };
+      }
+      if (item.id === 5) {
+        assert.equal(item.text, '[[TF_TERM_1]] as a Service at [[TF_TERM_2]]');
+        return { id: item.id, text: '[[TF_TERM_2]] 的 [[TF_TERM_1]] 即服务' };
+      }
+      return { id: item.id, text: '普通段落' };
+    });
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ items: results }) } }] });
+  });
+  const manager = new BrowserSessions({ key: 'test', model: 'fixture', base: 'https://model.example/v1' });
+  manager.scan = () => {};
+  const segments = [
+    { id: 1, source: 'The Kafka development team uses ', protected: false },
+    { id: 2, source: 'TrackerProducer', protected: true },
+    { id: 3, source: ' to send Kafka messages.', protected: false },
+  ];
+  const blocks = [
+    { id: 1, source: segments.map(slot => slot.source).join(''), context: '', segments },
+    { id: 4, source: 'An ordinary paragraph', context: '' },
+    { id: 5, source: 'Kafka as a Service at LinkedIn', context: '', attribute: 'alt', nodeId: 10 },
+  ];
+  const session = { epoch: 'doc', language: 'zh-CN', blocks, metrics: manager.newMetrics(),
+    resourceFailures: new Map(), cache: new Map(), translations: new Map(), failed: new Map(),
+    pending: new Set(), clients: new Set(), sequence: 0, workers: 0 };
+  await manager.translate(session, blocks);
+  assert.deepEqual(calls, [[1, 4, 5], [1]]);
+  const paragraph = session.translations.get(1);
+  assert.deepEqual(paragraph.parts.map(part => [part.id, part.text]), [
+    [1, 'Kafka 开发团队使用 '], [3, ' 发送 Kafka 消息。'],
+  ]);
+  assert.equal(paragraph.guards[1].source, 'TrackerProducer');
+  assert.equal(session.translations.get(5).text, 'LinkedIn 的 Kafka 即服务');
+  assert.equal(session.translations.get(4).text, '普通段落');
+  assert.equal(session.failed.size, 0);
 });
