@@ -17,6 +17,22 @@
 @media(max-width:767px) { .viewport-mode > span { display:none; }.inspector-text { grid-template-columns:1fr;gap:12px; }.reading-controls > span { flex-basis:100%; } }
 .web-live-shell .zoom-controls select[aria-label="两侧缩放比例"] { width:112px; }
 .web-notices { flex:none; }
+.translation-failure-list {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0 0 10px;
+  padding: 0 12px;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.translation-failure-list li { padding: 8px 0; overflow-wrap: anywhere; }
+.translation-failure-list li + li { border-top: 1px solid var(--line); }
+.translation-failure-list li > div { display: flex; flex-wrap: wrap; gap: 3px 8px; margin-top: 4px; color: var(--muted); }
+.translation-failure-list code { color: var(--ink); }
+.is-fullscreen-reading .translation-failure-list { max-height: none; overflow: visible; }
 .fullscreen-reading-toggle { display:inline-flex;align-items:center;gap:5px;margin-left:auto;color:var(--green); }
 .fullscreen-reading-bar { display:flex;align-items:center;gap:12px;min-height:34px;flex:none;font-size:12px; }
 .fullscreen-reading-bar strong { flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500; }

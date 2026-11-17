@@ -1,10 +1,12 @@
 import http from 'node:http';
 import { loadWebConfig } from './config.mjs';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
 import { BrowserSessions } from './sessions.mjs';
+import { createFailureLogger } from './diagnostics.mjs';
 
-export async function startWebServer({ port, config, origins, prepareContext } = {}) {
-  const sessions = new BrowserSessions(config, { prepareContext });
+export async function startWebServer({ port, config, origins, prepareContext, logFailure } = {}) {
+  const sessions = new BrowserSessions(config, { prepareContext, logFailure });
   const allowedOrigins = new Set(origins || ['http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:4173']);
   const sendJson = (response, status, data) => { response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); response.end(JSON.stringify(data)); };
   const server = http.createServer(async (request, response) => {
@@ -63,8 +65,14 @@ export async function startWebServer({ port, config, origins, prepareContext } =
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const config = await loadWebConfig();
+  const projectRoot = fileURLToPath(new URL('../../', import.meta.url));
+  const failureLog = createFailureLogger(resolve(projectRoot, process.env.TRANSFLOW_DATA_DIR || 'runtime', 'web'));
   const app = await startWebServer({ port: Number(process.env.TRANSFLOW_WEB_PORT || 8788), config,
+    logFailure: failureLog.write,
     origins: process.env.TRANSFLOW_FRONTEND_ORIGIN ? [process.env.TRANSFLOW_FRONTEND_ORIGIN, 'http://127.0.0.1:4173'] : undefined });
   console.log(`TransFlow 网页服务 http://127.0.0.1:${app.server.address().port} · 模型${config.key ? '已配置' : '未配置'}`);
-  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => app.close().finally(() => process.exit(0)));
+  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => app.close().finally(async () => {
+    await failureLog.flush();
+    process.exit(0);
+  }));
 }

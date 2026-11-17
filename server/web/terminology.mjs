@@ -1,3 +1,5 @@
+import { WebTranslationError } from './diagnostics.mjs';
+
 export const TERM_POLICY_VERSION = 2;
 
 const defaultTerms = [
@@ -25,11 +27,7 @@ export function parseExtraTerms(value) {
   return [...new Set(terms.map(term => term.trim()))];
 }
 
-class TermProtectionError extends Error {
-  constructor() {
-    super('模型未完整保留段落中的专名。');
-  }
-}
+const termError = (code, message) => new WebTranslationError(code, message, { format: true });
 
 export function protectTerms(block, matcher) {
   const matches = [...block.source.matchAll(matcher)].map(match => ({
@@ -89,15 +87,18 @@ export function protectTerms(block, matcher) {
   function restoreSlot(text, id) {
     const markers = slots.get(id);
     const used = new Set();
-    if (text.replace(markerPattern, '').includes(prefix)) throw new TermProtectionError();
+    if (text.replace(markerPattern, '').includes(prefix)) throw termError('TERM_INVALID_MARKER', '模型返回了格式无效的专名占位符。');
     const restored = text.replace(markerPattern, (marker, index) => {
       const term = markers.get(marker);
-      if (!term || used.has(marker) || (term.atStart && index !== 0) ||
-          (term.atEnd && index + marker.length !== text.length)) throw new TermProtectionError();
+      if (!term) throw termError('TERM_UNEXPECTED_MARKER', '模型在此节点返回了不属于该节点的专名占位符。');
+      if (used.has(marker)) throw termError('TERM_DUPLICATE_MARKER', '模型重复返回了同一个专名占位符。');
+      if ((term.atStart && index !== 0) || (term.atEnd && index + marker.length !== text.length)) {
+        throw termError('TERM_MOVED_MARKER', '模型移动了跨行内节点的专名占位符。');
+      }
       used.add(marker);
       return term.original;
     });
-    if (used.size !== markers.size) throw new TermProtectionError();
+    if (used.size !== markers.size) throw termError('TERM_MISSING_MARKER', '模型遗漏了必须保留的专名占位符。');
     return restored;
   }
 

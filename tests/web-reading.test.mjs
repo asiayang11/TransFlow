@@ -41,9 +41,20 @@ test('workbench persists semantic reading, fits desktop, inspects and retries on
  assert.equal(await session().page.evaluate(()=>innerWidth),1280);
  assert.equal(await page.locator('.mirror-root').first().evaluate(node=>node.style.zoom),'0.5');
  const readingSession=session().id;
+ session().resourceFailures.set('fixture',true);
+ backend.sessions.status(session());
  await page.getByRole('button',{name:'全屏阅读',exact:true}).click();
  assert.equal(await page.locator('.web-live-shell').evaluate(node=>node.classList.contains('is-fullscreen-reading')),true);
  assert.equal(await page.getByRole('button',{name:'退出全屏',exact:true}).isVisible(),true);
+ const failures=page.getByRole('list',{name:'未完成段落的错误明细'});
+ const noticeButton=page.getByRole('button',{name:'2 项提示',exact:true});
+ assert.equal(await noticeButton.getAttribute('aria-expanded'),'false');
+ assert.equal(await failures.isVisible(),false);
+ await noticeButton.click();
+ assert.equal(await noticeButton.getAttribute('aria-expanded'),'true');
+ await failures.waitFor({state:'visible'});
+ assert.match(await failures.innerText(),/MODEL_PROTECTED_CONTENT_CHANGED/);
+ assert.match(await failures.innerText(),/模型更改了受保护的/);
  await source().locator('summary').press('Escape');
  await until(()=>page.locator('.web-live-shell').evaluate(node=>!node.classList.contains('is-fullscreen-reading')));
  assert.equal(session().id,readingSession,'fullscreen toggles preserve the browser session');
@@ -56,6 +67,7 @@ test('workbench persists semantic reading, fits desktop, inspects and retries on
  await page.locator('.paragraph-inspector').waitFor();assert.match(await page.locator('.paragraph-inspector').innerText(),/Read the docs with fetch/);
  const before=[...session().translations.keys()],beforeCalls=calls.length;invalid=false;
  await page.getByRole('button',{name:'重译这一段',exact:true}).click();await until(()=>session().failed.size===0&&calls.length>beforeCalls);
+ await failures.waitFor({state:'hidden'});
  assert.equal(before.every(id=>session().translations.has(id)),true,'single retry retains every successful peer');assert.equal(calls.at(-1).length,1);
  const block=session().blocks.find(block=>block.source.includes('Read '));
  await assert.rejects(backend.sessions.command(session(),{type:'retry',requestId:'stale',epoch:'old',id:block.id,key:block.key}),/段落已变化/);

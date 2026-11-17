@@ -90,3 +90,5 @@ npm run test:web    # 另含真实 Chromium 集成测试；需要安装 Chromium
 P0最新完整验收见 [web-p0-review.md](web-p0-review.md)。
 
 P1已增加最近一次阅读恢复、桌面1280px/自适应视口、适应宽度、段落原文查看、未译定位与单段重试。刷新后重新打开网页并翻译；具体规则及边界见 [web-p1-review.md](web-p1-review.md)。
+
+翻译失败时，全屏阅读的「提示」可展开逐段错误码和原因。网页后端将最终仍失败的文本块记录到 `runtime/web/translation-errors.jsonl`（随 `TRANSFLOW_DATA_DIR` 配置移动）。每条包含时间、会话参考号、文本块编号、目标语言及错误原因。日志不写入网页原文、模型响应或 API Key。

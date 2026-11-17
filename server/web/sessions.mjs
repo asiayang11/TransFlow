@@ -5,6 +5,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { parsePublicUrl, publicAddress, publicFetch, createPublicProxy } from './network.mjs';
 import { LANGUAGES, requestWebModel, sourceKey, translateBatch } from './translation.mjs';
 import { discoverTermSpans, termWindow } from './term-discovery.mjs';
+import { translationDiagnostic } from './diagnostics.mjs';
 
 const recorder = await readFile(new URL('../../node_modules/@rrweb/record/dist/record.umd.cjs', import.meta.url), 'utf8');
 const scrollInstrumentation = `window.__transflowReadAnchor = ${readScrollAnchor.toString()};\n`;
@@ -17,7 +18,12 @@ const foregroundFirst = session => (left, right) =>
   Number(session.priorityBlocks?.has(right.id) || false) - Number(session.priorityBlocks?.has(left.id) || false);
 
 export class BrowserSessions {
-  constructor(config, { prepareContext = async () => {} } = {}) { this.config = config; this.sessions = new Map(); this.prepareContext = prepareContext; }
+  constructor(config, { prepareContext = async () => {}, logFailure } = {}) {
+    this.config = config;
+    this.sessions = new Map();
+    this.prepareContext = prepareContext;
+    this.logFailure = logFailure;
+  }
   async browser() {
     if (!this.browserPromise) this.browserPromise = (async () => {
       this.proxy = await createPublicProxy();
@@ -122,12 +128,35 @@ export class BrowserSessions {
       parts: block.segments?.filter(part => !part.protected).map((part, index) => ({ ...part, text: cached.parts[index] })),
       guards: block.segments?.map(({ id, source }) => ({ id, source })) };
   }
+  recordFailure(session, block, { code, message, httpStatus }) {
+    const error = { code, message, ...(httpStatus ? { httpStatus } : {}) };
+    session.failed.set(block.id, { key: sourceKey(block), error });
+    this.logFailure?.({ sessionId: session.id, epoch: session.epoch, blockId: block.id,
+      language: session.language, ...error });
+  }
   status(session) {
-    const completed = session.blocks.filter(block => session.translations.get(block.id)?.key === sourceKey(block)).length;
-    const failed = session.blocks.filter(block => session.failed.get(block.id) === sourceKey(block)).length;
+    let completed = 0;
+    let failed = 0;
+    const blocks = session.blocks.map(block => {
+      const { id, elementId, nodeId, attribute } = block;
+      const key = sourceKey(block);
+      const failure = session.failed.get(id);
+      const base = { id, elementId, nodeId, attribute, key };
+      if (session.translations.get(id)?.key === key) {
+        completed++;
+        return { ...base, state: 'translated' };
+      }
+      if (failure?.key === key) {
+        failed++;
+        const source = block.source.trim().replace(/\s+/g, ' ');
+        const preview = source.length > 90 ? source.slice(0, 90) + '…' : source;
+        return { ...base, state: 'failed', error: { ...failure.error, preview } };
+      }
+      return { ...base, state: session.pending.has(`${session.epoch}:${session.language}:${key}`) ? 'translating' : 'pending' };
+    });
     const data = { url: session.url, language: session.language, epoch: session.epoch, loading: session.loading,
       total: session.blocks.length, completed, failed, error: session.error || '', translationError: session.translationError,
-      blocks: session.blocks.map(block => ({ id:block.id, elementId:block.elementId, nodeId:block.nodeId, attribute:block.attribute, key:sourceKey(block), state:session.translations.get(block.id)?.key === sourceKey(block) ? 'translated' : session.failed.get(block.id) === sourceKey(block) ? 'failed' : session.pending.has(`${session.epoch}:${session.language}:${sourceKey(block)}`) ? 'translating' : 'pending' })),
+      blocks,
       resourceFailures: session.resourceFailures.size, metrics: { ...session.metrics, started: undefined, estimatedCostUsd: session.metrics.usageReports && this.config.inputPrice != null && this.config.outputPrice != null ? (session.metrics.inputTokens * this.config.inputPrice + session.metrics.outputTokens * this.config.outputPrice) / 1000000 : null }, viewport: session.blocks.filter(block => block.viewport).length, viewportCompleted: session.blocks.filter(block => block.viewport && session.translations.has(block.id)).length,
       translating: session.pending.size > 0, title: session.title || '', limited: session.blocks.length >= 3000 };
     this.send(session, 'status', data); return data;
@@ -332,7 +361,7 @@ export class BrowserSessions {
         session.translations.delete(id);
         if (current.has(id)) this.send(session, 'translation-reset', { epoch: session.epoch, language: session.language, id });
       }
-      for (const [id, key] of session.failed) if (current.get(id) !== key) session.failed.delete(id);
+      for (const [id, failure] of session.failed) if (current.get(id) !== failure.key) session.failed.delete(id);
       if (!session.failed.size && !session.translationPaused) session.translationError = '';
       for (const block of session.blocks) {
         if (termPlan && !plannedIds.has(block.id)) continue;
@@ -347,7 +376,7 @@ export class BrowserSessions {
       const todo = session.blocks.filter(block => {
         if (termPlan && !plannedIds.has(block.id)) return false;
         const key = sourceKey(block);
-        return session.translations.get(block.id)?.key !== key && !session.pending.has(`${session.epoch}:${session.language}:${key}`) && session.failed.get(block.id) !== key;
+        return session.translations.get(block.id)?.key !== key && !session.pending.has(`${session.epoch}:${session.language}:${key}`) && session.failed.get(block.id)?.key !== key;
       }).sort(foregroundFirst(session));
       // Small first response, then bounded paragraph batches. Deduplicate both
       // within a batch and between workers by source structure, not DOM ID.
@@ -394,11 +423,11 @@ export class BrowserSessions {
           entries.push(...result);
           if (result.failures.length) session.metrics.failedRequests++;
           if (retryingTerms) {
-            const succeeded = new Set(result.map(entry => entry.id));
-            failures = failures.filter(failure => !succeeded.has(failure.id));
+            const retried = new Set(requested.map(block => block.id));
+            failures = failures.filter(failure => !retried.has(failure.id)).concat(result.failures);
           } else {
             failures = result.failures;
-            const retryIds = new Set(failures.filter(failure => failure.code === 'TERM_PROTECTION').map(failure => failure.id));
+            const retryIds = new Set(failures.filter(failure => failure.retryTerm).map(failure => failure.id));
             if (retryIds.size && !attempt && !controller.signal.aborted) {
               requested = blocks.filter(block => retryIds.has(block.id));
               retryingTerms = true;
@@ -410,9 +439,14 @@ export class BrowserSessions {
         catch (error) {
           if (!isCurrent()) return;
           if (!controller.signal.aborted || timedOut) session.metrics.failedRequests++;
-          if (retryingTerms) break;
-          if (attempt || controller.signal.aborted || /鉴权|配置|mock/.test(error.message)) throw error;
-          if (/限流|HTTP 5/.test(error.message)) await new Promise(resolve => { const timer = setTimeout(resolve, 1000); controller.signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); });
+          if (retryingTerms) {
+            const retried = new Set(requested.map(block => block.id));
+            const diagnostic = translationDiagnostic(error, timedOut);
+            failures = failures.map(failure => retried.has(failure.id) ? { id: failure.id, ...diagnostic } : failure);
+            break;
+          }
+          if (attempt || controller.signal.aborted || ['MODEL_AUTH', 'MODEL_NOT_CONFIGURED', 'MODEL_MOCK_MODE'].includes(error.code)) throw error;
+          if (error.code === 'MODEL_RATE_LIMIT' || error.httpStatus >= 500) await new Promise(resolve => { const timer = setTimeout(resolve, 1000); controller.signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); });
         } finally {
           if (isCurrent()) session.metrics.durations.push(Date.now() - started);
         }
@@ -424,8 +458,7 @@ export class BrowserSessions {
         session.metrics.failures++;
         for (const failure of failures) {
           const block = blocks.find(block => block.id === failure.id);
-          const key = sourceKey(block);
-          if (current.get(block.id) === key) session.failed.set(block.id, key);
+          if (current.get(block.id) === sourceKey(block)) this.recordFailure(session, block, failure);
         }
         session.translationError = '部分段落未完成，可点击重试。';
       }
@@ -443,9 +476,14 @@ export class BrowserSessions {
       if (!session.failed.size) session.translationError = '';
     } catch (error) {
       if (isCurrent()) {
-        session.metrics.failures++; session.translationPaused = error.code !== 'TRANSLATION_FORMAT';
-        session.translationError = controller.signal.aborted ? '翻译请求超时，可点击重试。' : error.message.includes('模型') || error.message.includes('翻译') || error.message.includes('.env') || error.message.includes('mock') ? error.message : '无法连接翻译服务，请检查模型配置和网络后重试。';
-        for (const block of blocks) session.failed.set(block.id, sourceKey(block));
+        const diagnostic = translationDiagnostic(error, timedOut);
+        session.metrics.failures++;
+        session.translationPaused = !error.format;
+        session.translationError = diagnostic.message;
+        const current = new Map(session.blocks.map(block => [block.id, sourceKey(block)]));
+        for (const block of blocks) {
+          if (current.get(block.id) === sourceKey(block)) this.recordFailure(session, block, diagnostic);
+        }
       }
     } finally {
       clearTimeout(timeout); session.controllers.delete(controller);

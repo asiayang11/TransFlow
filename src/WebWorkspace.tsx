@@ -196,7 +196,9 @@ export default function WebWorkspace() {
   const navigation = (action: string) => {persist();restoring.current=null;setInspection(null);setError(''); dirty.current = false; sendCommand({ type: 'navigate', action }); };
   const summary = !sessionId ? '等待打开网页' : !connected ? '连接恢复中…' : status?.loading ? '正在加载网页…' : status?.translating ? `正在翻译 · ${status.completed} / ${status.total} 段${status.failed ? ` · ${status.failed} 段未完成` : ''}` : status?.translationError ? `已翻译 ${status.completed} / ${status.total} 段 · 部分未完成` : status?.total ? `已翻译 ${status.completed} / ${status.total} 段` : status?.metrics.captureMs != null ? '当前页面没有可翻译文字' : '正在识别网页文本…';
   const shownError = error || status?.error || '';
-  const noticeCount = Number(!!shownError)+Number(offline)+Number(!!status?.translationError)+Number(!!sessionId&&!connected)+Number(!!status?.resourceFailures);
+  const failedBlocks = status?.blocks.filter(block => block.state === 'failed') ?? [];
+  const translationWarning = status?.translationError || (failedBlocks.length ? '部分段落未完成，可点击重试。' : '');
+  const noticeCount = Number(!!shownError)+Number(offline)+Number(!!translationWarning)+Number(!!sessionId&&!connected)+Number(!!status?.resourceFailures);
 
   return <main className={`app-shell web-demo-shell web-live-shell ${fullscreen?'is-fullscreen-reading':''}`}>
     <AppHeader active="web" />
@@ -212,10 +214,22 @@ export default function WebWorkspace() {
         {shownError && <div className="url-error web-recovery" id="url-error" role="alert"><span>{shownError}</span>{sessionId && <button onClick={() => navigation('reload')}>重新载入网页</button>}</div>}
         <div className="sample-picker"><span>试试公开网页</span>{examples.map(([label, address]) => <button key={label} disabled={opening} onClick={() => void open(address)}>{label}</button>)}<span id="web-scope" className="demo-scope">支持公开文章、文档和产品页</span></div>
       </section>
-      <div id="web-notices" className={`web-notices ${showNotices?'is-open':''}`}>
+      <div id="web-notices" className={`web-notices ${showNotices?'is-open':''}`} hidden={fullscreen && !showNotices}>
       {fullscreen&&shownError&&<div className="web-service-note web-recovery" role="alert"><span>{shownError}</span>{sessionId&&<button onClick={()=>navigation('reload')}>重新载入网页</button>}</div>}
       {offline && <div className="web-service-note" role="alert">网页服务尚未启动。<span>在项目终端运行 <code>npm run web:backend</code>，然后打开网址。</span></div>}
-      {status?.translationError && <div className="web-service-note web-translation-warning" role="alert"><span>{status.translationError} 未完成的内容保留原文。</span><button onClick={() => sendCommand({ type: 'retry' })}>重试翻译</button></div>}
+      {translationWarning && <>
+        <div className="web-service-note web-translation-warning" role="alert">
+          <span>{failedBlocks.length > 0 && `${failedBlocks.length} 段未完成。 `}{translationWarning} 未完成的内容保留原文。</span>
+          <button disabled={!connected} onClick={() => sendCommand({ type: 'retry' })}>重试翻译</button>
+        </div>
+        {!!failedBlocks.length && <ul className="translation-failure-list" aria-label="未完成段落的错误明细">
+          {failedBlocks.map(block => <li key={block.id}>
+            <strong>{block.error?.preview || `文本块 #${block.id}`}</strong>
+            <div><code>{block.error?.code || 'DETAIL_UNAVAILABLE'}</code>
+              <span>{block.error?.message || '本次会话没有记录该文本块的错误原因。'}</span></div>
+          </li>)}
+        </ul>}
+      </>}
       {sessionId && !connected && <div className="web-service-note web-recovery" role="alert"><span>连接已断开，正在恢复。页面操作暂时暂停。</span><button onClick={() => reconnect.current?.()}>重新连接</button><button onClick={() => void open(url)}>重新打开网址</button></div>}
       {!!status?.resourceFailures && <div className="web-service-note web-recovery" role="alert"><span>{status.resourceFailures} 项图片、字体或样式未加载，页面可能显示不完整。</span><button onClick={() => sendCommand({ type: 'resources' })}>重试资源</button></div>}
       </div>
