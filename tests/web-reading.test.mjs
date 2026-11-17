@@ -67,6 +67,14 @@ test('workbench persists semantic reading, fits desktop, inspects and retries on
  assert.equal(await failures.isVisible(),false);
  await noticeButton.click();
  assert.equal(await noticeButton.getAttribute('aria-expanded'),'true');
+ const failure = [...session().failed.values()][0];
+ const savedError = failure.error;
+ failure.error = undefined;
+ backend.sessions.status(session());
+ await page.getByText(/1 段缺少诊断记录/).waitFor({state:'visible'});
+ assert.equal(await failures.isVisible(),false);
+ failure.error = savedError;
+ backend.sessions.status(session());
  await failures.waitFor({state:'visible'});
  assert.match(await failures.innerText(),/MODEL_RECOVERY_NO_TEXT/);
  assert.match(await failures.innerText(),/自动恢复未收到可用的文本译文/);

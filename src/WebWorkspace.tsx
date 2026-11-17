@@ -197,6 +197,10 @@ export default function WebWorkspace() {
   const summary = !sessionId ? '等待打开网页' : !connected ? '连接恢复中…' : status?.loading ? '正在加载网页…' : status?.translating ? `正在翻译 · ${status.completed} / ${status.total} 段${status.failed ? ` · ${status.failed} 段未完成` : ''}` : status?.translationError ? `已翻译 ${status.completed} / ${status.total} 段 · 部分未完成` : status?.total ? `已翻译 ${status.completed} / ${status.total} 段` : status?.metrics.captureMs != null ? '当前页面没有可翻译文字' : '正在识别网页文本…';
   const shownError = error || status?.error || '';
   const failedBlocks = status?.blocks.filter(block => block.state === 'failed') ?? [];
+  const diagnosedBlocks = failedBlocks.flatMap(block => block.error?.code && block.error.message
+    ? [{ id: block.id, error: block.error }]
+    : []);
+  const missingDiagnostics = failedBlocks.length - diagnosedBlocks.length;
   const translationWarning = status?.translationError || (failedBlocks.length ? '部分段落未完成，可点击重试。' : '');
   const noticeCount = Number(!!shownError)+Number(offline)+Number(!!translationWarning)+Number(!!sessionId&&!connected)+Number(!!status?.resourceFailures);
 
@@ -222,11 +226,13 @@ export default function WebWorkspace() {
           <span>{failedBlocks.length > 0 && `${failedBlocks.length} 段未完成。 `}{translationWarning} 未完成的内容保留原文。</span>
           <button disabled={!connected} onClick={() => sendCommand({ type: 'retry' })}>重试翻译</button>
         </div>
-        {!!failedBlocks.length && <ul className="translation-failure-list" aria-label="未完成段落的错误明细">
-          {failedBlocks.map(block => <li key={block.id}>
-            <strong>{block.error?.preview || `文本块 #${block.id}`}</strong>
-            <div><code>{block.error?.code || 'DETAIL_UNAVAILABLE'}</code>
-              <span>{block.error?.message || '本次会话没有记录该文本块的错误原因。'}</span></div>
+        {missingDiagnostics > 0 && <p className="web-service-note">
+          {missingDiagnostics} 段缺少诊断记录。若刚更新项目，请重启网页后端，再重新打开文章。
+        </p>}
+        {!!diagnosedBlocks.length && <ul className="translation-failure-list" aria-label="未完成段落的错误明细">
+          {diagnosedBlocks.map(({ id, error }) => <li key={id}>
+            <strong>{error.preview || `文本块 #${id}`}</strong>
+            <div><code>{error.code}</code><span>{error.message}</span></div>
           </li>)}
         </ul>}
       </>}

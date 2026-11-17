@@ -8,7 +8,9 @@ test('local API rejects cross-origin mutations, missing headers and private URL 
   const app=await startWebServer({port:0,config:{key:'',mode:'openai'}});
   t.after(()=>app.close());
   const base=`http://127.0.0.1:${app.server.address().port}`;
-  assert.equal((await fetch(`${base}/api/web/health`)).status,200);
+  const health=await fetch(`${base}/api/web/health`);
+  assert.equal(health.status,200);
+  assert.equal((await health.json()).translationDiagnostics,true);
   assert.equal((await fetch(`${base}/api/web/sessions`,{method:'POST',headers:{Origin:'https://evil.example','X-TransFlow-Web':'1'},body:'{}'})).status,403);
   assert.equal((await fetch(`${base}/api/web/sessions`,{method:'POST',body:'{}'})).status,403);
   for (const url of ['http://127.0.0.1','http://2130706433','http://[::1]','http://169.254.169.254']) {

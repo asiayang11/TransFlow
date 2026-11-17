@@ -16,7 +16,10 @@ export async function startWebServer({ port, config, origins, prepareContext, lo
     if (origin && !allowedOrigins.has(origin)) return sendJson(response, 403, { error: '请求来源无效。' });
     try {
       const url = new URL(request.url, `http://${host}`);
-      if (url.pathname === '/api/web/health' && request.method === 'GET') return sendJson(response, 200, { ok: true, configured: !!config.key && config.key !== 'sk-your-key-here', mode: config.mode });
+      if (url.pathname === '/api/web/health' && request.method === 'GET') return sendJson(response, 200, {
+        ok: true, configured: !!config.key && config.key !== 'sk-your-key-here', mode: config.mode,
+        translationDiagnostics: true,
+      });
       const mutation = !['GET', 'HEAD'].includes(request.method);
       if (mutation && request.headers['x-transflow-web'] !== '1') return sendJson(response, 403, { error: '请求校验失败。' });
       let body = {};
