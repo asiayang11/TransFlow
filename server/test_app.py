@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 _runtime = tempfile.TemporaryDirectory(prefix="transflow-tests-")
@@ -165,6 +165,57 @@ class FileDeliveryTests(unittest.TestCase):
         result, body = self.request({"Range": "bytes=2-5", "If-Range": '"old"'})
         self.assertEqual(result["status"], 200)
         self.assertEqual(body, b"0123456789")
+
+
+class PdfModelTests(unittest.TestCase):
+    def test_only_ark_receives_thinking_override_and_uses_a_separate_cache(self):
+        for base, mode, disabled in [
+            ("https://ark-cn-beijing.bytedance.net/api/v3", "disabled", True),
+            ("https://ark.cn-beijing.volces.com/api/v3", "default", False),
+            ("https://example.org/v1", "disabled", False),
+        ]:
+            with self.subTest(base=base, mode=mode):
+                engine = SimpleNamespace(
+                    openai_model="test", openai_base_url=base, openai_api_key="test"
+                )
+                settings = SimpleNamespace(
+                    translation=SimpleNamespace(lang_in="en", lang_out="zh", qps=4),
+                    translate_engine_settings=engine,
+                )
+                translator = Mock(options={})
+                with patch.object(app, "PDF_THINKING", mode), patch(
+                    "pdf2zh_next.translator.translator_impl.openai.OpenAITranslator",
+                    return_value=translator,
+                ):
+                    app.EngineRuntime().get_translator(settings)
+                self.assertEqual(translator.client.max_retries, 0)
+                if disabled:
+                    self.assertEqual(translator.options, {"extra_body": {"thinking": {"type": "disabled"}}})
+                    translator.add_cache_impact_parameters.assert_called_once_with("thinking", "disabled")
+                else:
+                    self.assertEqual(translator.options, {})
+                    translator.add_cache_impact_parameters.assert_not_called()
+
+    def test_model_timeout_unblocks_gate_and_stops_babeldoc_fallback_requests(self):
+        from openai import APITimeoutError
+
+        gate = Mock()
+        request = Mock(side_effect=APITimeoutError(request=Mock()))
+        completions = SimpleNamespace(create=request)
+        translator = SimpleNamespace(client=SimpleNamespace(chat=SimpleNamespace(completions=completions)))
+        telemetry = app.PageTelemetry("test", 1, None)
+        app.instrument_translator(translator)
+        with patch.object(app, "LLM_IN_FLIGHT", gate), patch.object(
+            app.TRANSLATOR_CALL_CONTEXT, "value", {"telemetry": telemetry, "attempts": 0}, create=True
+        ):
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, "模型请求等待超时"):
+                    completions.create()
+        request.assert_called_once()
+        gate.release.assert_called_once()
+        self.assertEqual(telemetry.snapshot()["llm_error_count"], 1)
+        with self.assertRaisesRegex(RuntimeError, "模型请求等待超时"):
+            telemetry.check_model_failure()
 
 
 class SchedulerCapacityTests(unittest.TestCase):

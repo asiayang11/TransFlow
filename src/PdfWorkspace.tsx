@@ -318,6 +318,8 @@ export default function PdfWorkspace() {
   const visibleProgress = pageResult?.page_number === currentPage ? pageResult : currentSummary;
   const queuedAt = visibleProgress?.queued_at ? Date.parse(visibleProgress.queued_at) : null;
   const elapsedSeconds = queuedAt === null ? null : Math.max(0, Math.floor((clockNow - queuedAt) / 1000));
+  const progressUpdatedAt = visibleProgress?.updated_at ? Date.parse(visibleProgress.updated_at) : NaN;
+  const secondsWithoutProgress = Math.floor((clockNow - progressUpdatedAt) / 1000);
   const selectedLanguage = LANGUAGE_OPTIONS.find((item) => item.value === targetLanguage)?.label;
   const isDemoTask = documentRecord?.execution_mode === "mock";
   const pageStageLabel = (page?: PageResult | DocumentRecord["pages"][number]) =>
@@ -566,7 +568,7 @@ export default function PdfWorkspace() {
                         {visibleProgress?.status === "queued"
                           ? queueCopy(visibleProgress)
                           : visibleProgress?.stage === "translating"
-                            ? `正在等待模型处理文本；阶段进度不代表剩余时间。${visibleProgress.stage_total ? ` 已处理 ${visibleProgress.stage_current}/${visibleProgress.stage_total} 个阶段单元。` : ""}`
+                            ? `正在等待模型返回译文。${visibleProgress.stage_total ? ` 已处理 ${visibleProgress.stage_current}/${visibleProgress.stage_total} 个文本单元。` : ""}${secondsWithoutProgress >= 30 ? ` 已有 ${secondsWithoutProgress} 秒没有新的进度。` : ""}`
                             : "PDFMathTranslate 正在保留插图和公式，并重建对应的译文页面。"}
                       </p>
                       <div

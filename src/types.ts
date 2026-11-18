@@ -46,6 +46,7 @@ export interface PageSummary {
     llm_in_flight_wait_ms_total: number;
     prompt_tokens: number;
     completion_tokens: number;
+    reasoning_tokens?: number;
     source_page_reused: boolean;
     source_page_create_ms: number;
     layout_model_reused: boolean;

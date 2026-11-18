@@ -94,7 +94,8 @@ npm run backend
 | `TRANSFLOW_PREFETCH_PAGES` | `5` | 阅读窗口的预取页数，后端限制为 1–10。 |
 | `TRANSFLOW_MAX_WORKERS` | `2` | 并行处理页数；前台页可额外占用一个处理通道。 |
 | `TRANSFLOW_LLM_QPS` / `TRANSFLOW_LLM_MAX_IN_FLIGHT` | `4` / `4` | 全局请求节奏和最大在途请求数，应按模型配额调整。 |
-| `TRANSFLOW_LLM_MAX_ATTEMPTS` / `TRANSFLOW_LLM_TIMEOUT_SECONDS` | `3` / `120` | 模型请求重试次数和单次超时秒数。 |
+| `TRANSFLOW_LLM_MAX_ATTEMPTS` / `TRANSFLOW_LLM_TIMEOUT_SECONDS` | `3` / `120` | 单次翻译调用的限流尝试上限，以及等待请求名额和模型网络操作的超时秒数。超时的 PDF 页会显示失败并可重试。 |
+| `TRANSFLOW_PDF_THINKING` | `disabled` | PDF 翻译调用方舟时关闭深度思考。设为 `default` 使用模型默认配置。 |
 | `TRANSFLOW_TRANSLATE_TABLE_TEXT` | `false` | 开启后按需加载表格 OCR；默认关闭以缩短普通页面等待。 |
 | `TRANSFLOW_KEEP_JOB_FILES` | `false` | 保留 BabelDOC 中间文件以便排障；会增加磁盘占用。 |
 | `TRANSFLOW_DATA_DIR` | `runtime` | PDF 任务、耗时记录和网页翻译诊断目录。 |

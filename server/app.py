@@ -81,6 +81,9 @@ if OPENAI_API_KEY == "sk-your-key-here":
     OPENAI_API_KEY = ""
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+PDF_THINKING = os.getenv("TRANSFLOW_PDF_THINKING", "disabled").lower()
+if PDF_THINKING not in {"default", "disabled"}:
+    raise SystemExit("TRANSFLOW_PDF_THINKING 必须是 default 或 disabled。")
 SOURCE_LANGUAGE = os.getenv("TRANSFLOW_SOURCE_LANGUAGE", "en")
 LLM_MODE = os.getenv("TRANSFLOW_LLM_MODE", "openai").lower()
 if LLM_MODE not in {"openai", "mock"}:
@@ -137,6 +140,15 @@ BABELDOC_STAGE_MAP: dict[str, tuple[str, str, int, int]] = {
 }
 
 
+def pdf_thinking_disabled(base_url: str) -> bool:
+    host = urllib.parse.urlsplit(base_url).hostname or ""
+    return (
+        PDF_THINKING == "disabled"
+        and host.startswith(("ark.", "ark-"))
+        and host.endswith((".volces.com", ".bytedance.net"))
+    )
+
+
 class PageTelemetry:
     """Thread-safe timings for one page translation run."""
 
@@ -148,6 +160,7 @@ class PageTelemetry:
         self.stage_started = self.started
         self.stage_name = "worker"
         self.lock = threading.Lock()
+        self.model_failure: str | None = None
         self.stage_durations_ms: dict[str, int] = {}
         self.values: dict[str, Any] = {
             "queue_wait_ms": self._queue_wait_ms(queued_at),
@@ -163,6 +176,7 @@ class PageTelemetry:
             "llm_in_flight_wait_ms_total": 0,
             "prompt_tokens": 0,
             "completion_tokens": 0,
+            "reasoning_tokens": 0,
             "source_page_reused": False,
             "source_page_create_ms": 0,
             "layout_model_reused": False,
@@ -224,6 +238,20 @@ class PageTelemetry:
                 self.values["completion_tokens"] += int(
                     getattr(usage, "completion_tokens", 0) or 0
                 )
+                details = getattr(usage, "completion_tokens_details", None)
+                self.values["reasoning_tokens"] += int(
+                    getattr(details, "reasoning_tokens", 0) or 0
+                )
+
+    def stop_model_requests(self, message: str) -> None:
+        with self.lock:
+            if self.model_failure is None:
+                self.model_failure = message
+
+    def check_model_failure(self) -> None:
+        with self.lock:
+            if self.model_failure is not None:
+                raise RuntimeError(self.model_failure)
 
     def record_logical_request(self, cache_hit: bool) -> None:
         with self.lock:
@@ -297,6 +325,7 @@ class EngineRuntime:
             str(engine.openai_base_url),
             str(settings.translation.qps),
             str(engine.openai_api_key)[-8:],
+            PDF_THINKING,
         )
         with self.lock:
             if key in self.translators:
@@ -309,6 +338,10 @@ class EngineRuntime:
                 settings,
                 QPSRateLimiter(settings.translation.qps),
             )
+            translator.client.max_retries = 0
+            if pdf_thinking_disabled(str(engine.openai_base_url)):
+                translator.options["extra_body"] = {"thinking": {"type": "disabled"}}
+                translator.add_cache_impact_parameters("thinking", "disabled")
             create_ms = round((time.monotonic() - started) * 1000)
             self.translators[key] = translator
             return translator, False, create_ms
@@ -472,6 +505,7 @@ def default_metrics() -> dict[str, Any]:
         "llm_in_flight_wait_ms_total": 0,
         "prompt_tokens": 0,
         "completion_tokens": 0,
+        "reasoning_tokens": 0,
         "source_page_reused": False,
         "source_page_create_ms": 0,
         "layout_model_reused": False,
@@ -657,7 +691,11 @@ def load_existing_documents() -> None:
                 translated_document_path(record["id"]).unlink(missing_ok=True)
             for page in record.get("pages", []):
                 output = translated_page_path(record["id"], page["page_number"])
-                if engine_changed or not output.exists() or page.get("status") in ACTIVE_PAGE_STATUSES:
+                if (
+                    engine_changed
+                    or page.get("status") in ACTIVE_PAGE_STATUSES
+                    or (page.get("status") == "ready" and not output.exists())
+                ):
                     page.update(
                         status="pending",
                         progress=0,
@@ -868,6 +906,8 @@ def instrument_translator(translator: Any) -> None:
     if not create:
         return
 
+    from openai import APITimeoutError
+
     def measured_create(*args: Any, **kwargs: Any):
         wait_started = time.monotonic()
         wait_ms = 0
@@ -875,21 +915,33 @@ def instrument_translator(translator: Any) -> None:
         error: Exception | None = None
         response: Any | None = None
         context = getattr(TRANSLATOR_CALL_CONTEXT, "value", None)
+        telemetry = context.get("telemetry") if context else None
+        if telemetry:
+            telemetry.check_model_failure()
         if context is not None:
             context["attempts"] += 1
         try:
-            telemetry = context.get("telemetry") if context else None
             key = (telemetry.document_id, telemetry.page_number) if telemetry else None
             LLM_IN_FLIGHT.acquire(key, timeout=LLM_TIMEOUT_SECONDS)
             wait_ms = round((time.monotonic() - wait_started) * 1000)
             api_started = time.monotonic()
             try:
+                if telemetry:
+                    telemetry.check_model_failure()
                 response = create(*args, **kwargs)
             finally:
                 LLM_IN_FLIGHT.release()
             return response
         except Exception as exc:
             error = exc
+            if isinstance(exc, (APITimeoutError, TimeoutError)):
+                message = (
+                    f"模型请求等待超时（{LLM_TIMEOUT_SECONDS} 秒），本页已停止，请重试。"
+                    if isinstance(exc, APITimeoutError) else str(exc)
+                )
+                if telemetry:
+                    telemetry.stop_model_requests(message)
+                raise RuntimeError(message) from exc
             if (
                 context is not None
                 and (
@@ -898,9 +950,10 @@ def instrument_translator(translator: Any) -> None:
                 )
                 and context["attempts"] >= LLM_MAX_ATTEMPTS
             ):
-                raise RuntimeError(
-                    f"OpenAI API 连续 {LLM_MAX_ATTEMPTS} 次限流，已停止本页，稍后可重试。"
-                ) from exc
+                message = f"OpenAI API 连续 {LLM_MAX_ATTEMPTS} 次限流，已停止本页，稍后可重试。"
+                if telemetry:
+                    telemetry.stop_model_requests(message)
+                raise RuntimeError(message) from exc
             raise
         finally:
             active_telemetry = context.get("telemetry") if context else None
@@ -929,6 +982,7 @@ class PageTranslatorProxy:
     def _call(self, method_name: str, text: Any, *args: Any, **kwargs: Any) -> Any:
         if text is None and method_name == "do_llm_translate":
             return None
+        self._telemetry.check_model_failure()
         cache_hit = False
         if text is not None and method_name in {"translate", "llm_translate"}:
             try:
@@ -1115,6 +1169,9 @@ async def run_pdfmathtranslate_async(
             if result.mono_pdf_path:
                 mono_pdf = Path(result.mono_pdf_path)
             break
+    # BabelDOC can handle model errors internally and fall back to the source
+    # paragraphs. A timed-out or rate-limited page must not publish as complete.
+    telemetry.check_model_failure()
     if not mono_pdf or not mono_pdf.exists():
         raise RuntimeError("PDFMathTranslate 未生成单语译文 PDF。")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1664,6 +1721,7 @@ class TransFlowHandler(BaseHTTPRequestHandler):
                             "max_in_flight": LLM_MAX_IN_FLIGHT,
                             "max_attempts": LLM_MAX_ATTEMPTS,
                             "timeout_seconds": LLM_TIMEOUT_SECONDS,
+                            "thinking": "disabled" if pdf_thinking_disabled(OPENAI_BASE_URL) else "default",
                             "translate_table_text": TRANSLATE_TABLE_TEXT,
                         },
                         "engine_runtime": ENGINE_RUNTIME.status(),

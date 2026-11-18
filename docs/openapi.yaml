@@ -193,6 +193,7 @@ components:
             max_in_flight: { type: integer, minimum: 1 }
             max_attempts: { type: integer, minimum: 1 }
             timeout_seconds: { type: integer, minimum: 1 }
+            thinking: { type: string, enum: [default, disabled] }
             translate_table_text: { type: boolean }
           required: [qps, workers_per_page, max_in_flight, max_attempts, timeout_seconds, translate_table_text]
         engine_runtime:
@@ -223,6 +224,7 @@ components:
         llm_in_flight_wait_ms_total: { type: integer, minimum: 0 }
         prompt_tokens: { type: integer, minimum: 0 }
         completion_tokens: { type: integer, minimum: 0 }
+        reasoning_tokens: { type: integer, minimum: 0, description: 模型服务报告的思考 Token 数 }
         source_page_reused: { type: boolean }
         source_page_create_ms: { type: integer, minimum: 0 }
         layout_model_reused: { type: boolean }
