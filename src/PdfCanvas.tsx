@@ -8,40 +8,62 @@ export interface PdfCanvasProps {
   fileUrl: string;
   pageNumber: number;
   loadingLabel?: string;
-  zoom?: number;
   displayPageNumber?: number;
+  onPageRatio?: (ratio: number) => void;
 }
 
-interface RenderSize {
-  width: number;
-  height: number;
+interface OpenPdf {
+  task: ReturnType<typeof pdfjsLib.getDocument>;
+  users: number;
+  dispose?: ReturnType<typeof setTimeout>;
 }
 
-export default function PdfCanvas({ fileUrl, pageNumber, loadingLabel, zoom = 1, displayPageNumber = pageNumber }: PdfCanvasProps) {
-  const hostRef = useRef<HTMLDivElement>(null);
+const openPdfs = new Map<string, OpenPdf>();
+
+function acquirePdf(url: string) {
+  let entry = openPdfs.get(url);
+  if (!entry) {
+    const task = pdfjsLib.getDocument(url);
+    void task.promise.catch(() => undefined);
+    entry = { task, users: 0 };
+    openPdfs.set(url, entry);
+  }
+  const open = entry;
+  clearTimeout(open.dispose);
+  open.users += 1;
+  return { task: open.task, release: () => {
+    if (--open.users > 0) return;
+    // A jump can move the whole render window in the same React commit.
+    open.dispose = setTimeout(() => {
+      openPdfs.delete(url);
+      void open.task.destroy().catch(() => undefined);
+    }, 0);
+  } };
+}
+
+export default function PdfCanvas({ fileUrl, pageNumber, loadingLabel, displayPageNumber = pageNumber, onPageRatio }: PdfCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [renderSize, setRenderSize] = useState<RenderSize | null>(null);
   const documentRef = useRef<ReturnType<typeof pdfjsLib.getDocument> | null>(null);
-  const [hostWidth, setHostWidth] = useState(0);
+  const [paperWidth, setPaperWidth] = useState(0);
 
   useEffect(() => {
-    const task = pdfjsLib.getDocument(fileUrl);
+    const { task, release } = acquirePdf(fileUrl);
     documentRef.current = task;
-    // Rendering below reports errors; attach a handler during teardown too.
-    void task.promise.catch(() => undefined);
     return () => {
       documentRef.current = null;
-      void task.destroy();
+      release();
     };
   }, [fileUrl]);
 
   useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    const observer = new ResizeObserver(() => setHostWidth(host.clientWidth));
-    observer.observe(host);
+    const paper = canvasRef.current?.parentElement;
+    if (!paper) return;
+    const measure = () => setPaperWidth(paper.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(paper);
     return () => observer.disconnect();
   }, []);
 
@@ -49,9 +71,8 @@ export default function PdfCanvas({ fileUrl, pageNumber, loadingLabel, zoom = 1,
     let disposed = false;
     let renderTask: { cancel: () => void; promise: Promise<void> } | null = null;
     const documentTask = documentRef.current;
-    const host = hostRef.current;
     const canvas = canvasRef.current;
-    if (!host || !canvas || !documentTask) return;
+    if (!paperWidth || !canvas || !documentTask) return;
 
     const render = async () => {
       setLoading(true);
@@ -60,25 +81,25 @@ export default function PdfCanvas({ fileUrl, pageNumber, loadingLabel, zoom = 1,
         const pdf = await documentTask.promise;
         if (disposed) return;
         const page = await pdf.getPage(pageNumber);
+        if (disposed) return;
         const baseViewport = page.getViewport({ scale: 1 });
-        const availableWidth = Math.max(280, host.clientWidth - 32);
-        const scale = Math.min(4, availableWidth / baseViewport.width * zoom);
+        onPageRatio?.(baseViewport.width / baseViewport.height);
+        const scale = Math.min(4, paperWidth / baseViewport.width);
         const viewport = page.getViewport({ scale });
-        const ratio = window.devicePixelRatio || 1;
+        // Bound backing-store memory, including on Retina displays at 3x zoom.
+        const ratio = Math.min(window.devicePixelRatio || 1, Math.sqrt(6_000_000 / (viewport.width * viewport.height)));
         const context = canvas.getContext("2d");
         if (!context || disposed) return;
 
         canvas.width = Math.floor(viewport.width * ratio);
         canvas.height = Math.floor(viewport.height * ratio);
-        canvas.style.width = `${Math.floor(viewport.width)}px`;
-        canvas.style.height = `${Math.floor(viewport.height)}px`;
-        setRenderSize({ width: Math.floor(viewport.width), height: Math.floor(viewport.height) });
         renderTask = page.render({
           canvasContext: context,
           viewport,
           transform: ratio === 1 ? undefined : [ratio, 0, 0, ratio, 0, 0],
         });
         await renderTask.promise;
+        page.cleanup();
         if (!disposed) setLoading(false);
       } catch (renderError) {
         if (!disposed) {
@@ -93,22 +114,17 @@ export default function PdfCanvas({ fileUrl, pageNumber, loadingLabel, zoom = 1,
       disposed = true;
       renderTask?.cancel();
     };
-  }, [fileUrl, pageNumber, hostWidth, zoom]);
+  }, [fileUrl, pageNumber, paperWidth, onPageRatio]);
 
   return (
-    <div className="pdf-canvas-host" ref={hostRef}>
+    <>
       {loading && (
-        <div className="page-loading">
+        <div className="page-loading" role="status">
           <span />{loadingLabel || "正在渲染 PDF 页面"}
         </div>
       )}
       {error && <div className="inline-error">{error}</div>}
-      <div
-        className="pdf-page-surface"
-        style={renderSize ? { width: renderSize.width, height: renderSize.height } : undefined}
-      >
-        <canvas ref={canvasRef} aria-label={`PDF 第 ${displayPageNumber} 页`} />
-      </div>
-    </div>
+      <canvas ref={canvasRef} aria-label={`PDF 第 ${displayPageNumber} 页`} data-rendered={!loading && !error} />
+    </>
   );
 }

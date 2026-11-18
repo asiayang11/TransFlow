@@ -1,19 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { X } from "@phosphor-icons/react";
-import PdfCanvas from "./PdfPreview";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import PdfPagePair, { pageStageLabel, STATUS_LABEL } from "./PdfPagePair";
 import { LatestRequest } from "./latest-request";
 import AppHeader from "./AppHeader";
-import { usePdfPageGestures } from "./usePdfPageGestures";
+import { usePdfScrollReader } from "./usePdfScrollReader";
 import {
   getDocument,
   getHealth,
-  getPage,
   prefetchPages,
   setTranslationMode,
   translatePage,
   uploadDocument,
 } from "./api";
-import type { DocumentRecord, HealthRecord, PageResult, PageStatus } from "./types";
+import type { DocumentRecord, HealthRecord, PageStatus, PageSummary } from "./types";
 
 const LANGUAGE_OPTIONS = [
   { value: "zh-CN", label: "简体中文" },
@@ -24,19 +22,6 @@ const LANGUAGE_OPTIONS = [
   { value: "de", label: "Deutsch" },
   { value: "es", label: "Español" },
 ];
-
-const STATUS_LABEL: Record<PageStatus, string> = {
-  pending: "等待",
-  queued: "队列中",
-  preparing: "准备模型",
-  analyzing: "分析页面",
-  translating: "翻译中",
-  typesetting: "重建版面",
-  generating: "生成 PDF",
-  validating: "验证页面",
-  ready: "已缓存",
-  error: "失败",
-};
 
 const ACTIVE_STATUSES: PageStatus[] = [
   "queued",
@@ -53,12 +38,9 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function queueCopy(page?: PageResult | DocumentRecord["pages"][number]) {
-  if (!page || page.status !== "queued") return null;
-  if (page.queue_position) {
-    return `当前排在第 ${page.queue_position} 位${page.queue_total ? `，队列共 ${page.queue_total} 页` : ""}。切换到本页后已自动提升优先级。`;
-  }
-  return "正在取得版面处理资源，即将开始。";
+function translatedPageUrl(documentId: string, page: PageSummary) {
+  if (page.status !== "ready" && !page.artifact_revision && !page.artifact_kind) return null;
+  return `/api/v1/documents/${documentId}/pages/${page.page_number}/translated.pdf?v=${encodeURIComponent(page.artifact_revision || "legacy")}`;
 }
 
 function locationTask(): { documentId: string; page: number } | null {
@@ -77,16 +59,12 @@ function taskUrl(documentId: string, page: number) {
 
 export default function PdfWorkspace() {
   const inputRef = useRef<HTMLInputElement>(null);
-  const readerRef = useRef<HTMLDivElement>(null);
   const navigationVersion = useRef(0);
   const documentRequest = useRef(new LatestRequest());
-  const pageRequest = useRef(new LatestRequest());
   const uploadingRef = useRef(false);
-  const selectionRef = useRef("");
   const [health, setHealth] = useState<HealthRecord | null>(null);
   const [targetLanguage, setTargetLanguage] = useState("zh-CN");
   const [documentRecord, setDocumentRecord] = useState<DocumentRecord | null>(null);
-  const [pageResult, setPageResult] = useState<PageResult | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -95,9 +73,8 @@ export default function PdfWorkspace() {
   const [changingMode, setChangingMode] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [clockNow, setClockNow] = useState(Date.now());
-  const [dismissedNotices, setDismissedNotices] = useState<ReadonlySet<string>>(() => new Set());
-  selectionRef.current = `${documentRecord?.id ?? ""}:${currentPage}`;
-  usePdfPageGestures(readerRef, documentRecord?.id, currentPage, documentRecord?.page_count ?? 0, setCurrentPage);
+  const { pagesRef, controlsRef, renderRange, jumpToPage } = usePdfScrollReader(documentRecord?.id, currentPage, setCurrentPage);
+  const hasActivePages = documentRecord?.pages.some(page => ACTIVE_STATUSES.includes(page.status));
 
   useEffect(() => {
     if (!documentRecord) return;
@@ -107,19 +84,19 @@ export default function PdfWorkspace() {
           || event.altKey || event.ctrlKey || event.metaKey) return;
       if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
         event.preventDefault();
-        setCurrentPage((page) => Math.max(1, Math.min(documentRecord.page_count,
-          page + (event.key === "ArrowRight" ? 1 : -1))));
+        jumpToPage(Math.max(1, Math.min(documentRecord.page_count,
+          currentPage + (event.key === "ArrowRight" ? 1 : -1))));
       }
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [documentRecord?.id, documentRecord?.page_count]);
+  }, [documentRecord?.id, documentRecord?.page_count, currentPage, jumpToPage]);
 
   useEffect(() => {
-    if (!documentRecord?.pages.some((page) => ACTIVE_STATUSES.includes(page.status))) return;
+    if (!hasActivePages) return;
     const timer = setInterval(() => setClockNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [documentRecord?.pages.some((page) => ACTIVE_STATUSES.includes(page.status))]);
+  }, [hasActivePages]);
 
   useEffect(() => {
     getHealth().then(setHealth).catch(() => setHealth(null));
@@ -128,13 +105,9 @@ export default function PdfWorkspace() {
   const restoreFromLocation = useCallback(async () => {
     const version = ++navigationVersion.current;
     documentRequest.current.cancel();
-    pageRequest.current.cancel();
     setDocumentRecord(null);
-    setPageResult(null);
     const task = locationTask();
     if (!task) {
-      setDocumentRecord(null);
-      setPageResult(null);
       setCurrentPage(1);
       setRestoringTask(false);
       return;
@@ -148,14 +121,12 @@ export default function PdfWorkspace() {
       setDocumentRecord(restored);
       setTargetLanguage(restored.target_language);
       setCurrentPage(restoredPage);
-      setPageResult(null);
       if (restoredPage !== task.page) {
         window.history.replaceState(null, "", taskUrl(restored.id, restoredPage));
       }
     } catch (restoreError) {
       if (version !== navigationVersion.current) return;
       setDocumentRecord(null);
-      setPageResult(null);
       setError(restoreError instanceof Error ? restoreError.message : "无法恢复翻译任务");
     } finally {
       if (version === navigationVersion.current) setRestoringTask(false);
@@ -170,7 +141,6 @@ export default function PdfWorkspace() {
       window.removeEventListener("popstate", handlePopState);
       navigationVersion.current += 1;
       documentRequest.current.cancel();
-      pageRequest.current.cancel();
     };
   }, [restoreFromLocation]);
 
@@ -180,24 +150,11 @@ export default function PdfWorkspace() {
     const signal = documentRequest.current.start();
     try {
       const next = await getDocument(documentRecord.id, signal);
-      if (documentRequest.current.owns(signal) && version === navigationVersion.current && selectionRef.current.startsWith(`${documentRecord.id}:`)) setDocumentRecord(next);
+      if (documentRequest.current.owns(signal) && version === navigationVersion.current) setDocumentRecord(next);
     } catch (requestError) {
       if (!signal.aborted) throw requestError;
     }
   }, [documentRecord?.id]);
-
-  const refreshPage = useCallback(async () => {
-    if (!documentRecord) return;
-    const version = navigationVersion.current;
-    const selection = `${documentRecord.id}:${currentPage}`;
-    const signal = pageRequest.current.start();
-    try {
-      const next = await getPage(documentRecord.id, currentPage, signal);
-      if (pageRequest.current.owns(signal) && version === navigationVersion.current && selectionRef.current === selection) setPageResult(next);
-    } catch (requestError) {
-      if (!signal.aborted) throw requestError;
-    }
-  }, [documentRecord?.id, currentPage]);
 
   useEffect(() => {
     if (!documentRecord) return;
@@ -206,34 +163,30 @@ export default function PdfWorkspace() {
       "",
       taskUrl(documentRecord.id, currentPage),
     );
-    setPageResult(null);
     let cancelled = false;
-    const sync = async () => {
+    // Keep the URL responsive, but do not reprioritize translation for every
+    // transient page passed during a fast scroll.
+    const timer = setTimeout(async () => {
       try {
         await prefetchPages(documentRecord.id, currentPage, documentRecord.prefetch_pages);
-        if (!cancelled) await Promise.all([refreshDocument(), refreshPage()]);
+        if (!cancelled) await refreshDocument();
       } catch (syncError) {
         if (!cancelled) setError(syncError instanceof Error ? syncError.message : "无法加载页面");
       }
-    };
-    void sync();
-    return () => { cancelled = true; };
-  }, [documentRecord?.id, currentPage]);
+    }, 200);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [documentRecord?.id, currentPage, refreshDocument]);
 
   useEffect(() => {
     if (!documentRecord) return;
-    const active = documentRecord.pages.some((page) => ACTIVE_STATUSES.includes(page.status));
-    const currentActive = pageResult && (
-      pageResult.status === "pending" || ACTIVE_STATUSES.includes(pageResult.status)
-    );
-    if (!active && !currentActive) return;
+    if (!hasActivePages && documentRecord.pages[currentPage - 1]?.status !== "pending") return;
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     let failures = 0;
     const poll = async () => {
       try {
-        if (!document.hidden) await Promise.all([refreshDocument(), refreshPage()]);
+        if (!document.hidden) await refreshDocument();
         failures = 0;
       } catch {
         failures += 1;
@@ -243,7 +196,7 @@ export default function PdfWorkspace() {
     };
     timer = setTimeout(poll, 1000);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [documentRecord?.id, documentRecord?.pages.some((page) => ACTIVE_STATUSES.includes(page.status)), pageResult?.status, refreshDocument, refreshPage]);
+  }, [documentRecord?.id, hasActivePages, documentRecord?.pages[currentPage - 1]?.status, refreshDocument]);
 
   const handleFile = async (file?: File) => {
     if (!file || uploadingRef.current) return;
@@ -265,7 +218,6 @@ export default function PdfWorkspace() {
       if (version !== navigationVersion.current) return;
       setDocumentRecord(created);
       setCurrentPage(1);
-      setPageResult(null);
       window.history.pushState(null, "", taskUrl(created.id, 1));
     } catch (uploadError) {
       if (version === navigationVersion.current) setError(uploadError instanceof Error ? uploadError.message : "上传失败");
@@ -278,27 +230,24 @@ export default function PdfWorkspace() {
   const reset = () => {
     navigationVersion.current += 1;
     documentRequest.current.cancel();
-    pageRequest.current.cancel();
-    selectionRef.current = "";
     setRestoringTask(false);
     setDocumentRecord(null);
-    setPageResult(null);
     setCurrentPage(1);
     setError(null);
     window.history.pushState(null, "", "/pdf");
   };
 
-  const retryCurrent = async () => {
+  const retryPage = useCallback(async (page: number) => {
     if (!documentRecord) return;
+    const version = navigationVersion.current;
     setError(null);
     try {
-      await translatePage(documentRecord.id, currentPage);
-      await refreshDocument();
-      await refreshPage();
+      await translatePage(documentRecord.id, page);
+      if (version === navigationVersion.current) await refreshDocument();
     } catch (retryError) {
-      setError(retryError instanceof Error ? retryError.message : "重试失败");
+      if (version === navigationVersion.current) setError(retryError instanceof Error ? retryError.message : "重试失败");
     }
-  };
+  }, [documentRecord?.id, refreshDocument]);
 
   const toggleTranslationMode = async () => {
     if (!documentRecord || changingMode) return;
@@ -320,35 +269,8 @@ export default function PdfWorkspace() {
   );
 
   const currentSummary = documentRecord?.pages[currentPage - 1];
-  const currentResult = pageResult?.page_number === currentPage ? pageResult : null;
-  const visibleProgress = currentResult ?? currentSummary;
-  const noticeScope = `${documentRecord?.id}:${currentPage}:${visibleProgress?.attempt}`;
-  const notices: { key: string; title: string; messages: string[]; retry?: boolean }[] = [];
-  if (visibleProgress?.quality?.status === "needs_review") {
-    notices.push({
-      key: `${noticeScope}:quality:${visibleProgress.artifact_revision ?? ""}`,
-      title: "需复核",
-      messages: visibleProgress.quality.warnings,
-    });
-  }
-  if (currentResult?.translated_pdf_url && currentResult.status !== "ready") {
-    const failed = currentResult.status === "error";
-    notices.push({
-      key: `${noticeScope}:${failed ? "retry-failed" : "retry-active"}`,
-      title: "正在展示上次成功结果",
-      messages: [failed ? currentResult.error || "本次翻译失败，请重试。" : currentResult.stage_label],
-      retry: failed,
-    });
-  }
-  const hasDismissedNotices = notices.some(({ key }) => dismissedNotices.has(key));
-  const queuedAt = visibleProgress?.queued_at ? Date.parse(visibleProgress.queued_at) : null;
-  const elapsedSeconds = queuedAt === null ? null : Math.max(0, Math.floor((clockNow - queuedAt) / 1000));
-  const progressUpdatedAt = visibleProgress?.updated_at ? Date.parse(visibleProgress.updated_at) : NaN;
-  const secondsWithoutProgress = Math.floor((clockNow - progressUpdatedAt) / 1000);
   const selectedLanguage = LANGUAGE_OPTIONS.find((item) => item.value === targetLanguage)?.label;
   const isDemoTask = documentRecord?.execution_mode === "mock";
-  const pageStageLabel = (page?: PageResult | DocumentRecord["pages"][number]) =>
-    isDemoTask && page?.status === "ready" ? "原文副本（未翻译）" : page?.stage_label;
   const fileUrl = documentRecord
     ? `/api/v1/documents/${documentRecord.id}/source.pdf`
     : null;
@@ -483,12 +405,13 @@ export default function PdfWorkspace() {
                 <button
                   key={page.page_number}
                   className={`page-item ${currentPage === page.page_number ? "is-active" : ""}`}
-                  onClick={() => setCurrentPage(page.page_number)}
+                  onClick={() => jumpToPage(page.page_number)}
+                  aria-current={currentPage === page.page_number ? "page" : undefined}
                 >
                   <span className="page-number">{String(page.page_number).padStart(2, "0")}</span>
                   <span className="page-progress-copy">
                     <span className="page-label">第 {page.page_number} 页</span>
-                    <span className="page-stage" title={pageStageLabel(page)}>{pageStageLabel(page)}</span>
+                    <span className="page-stage" title={pageStageLabel(page, isDemoTask)}>{pageStageLabel(page, isDemoTask)}</span>
                     <span className="page-progress-track" aria-hidden="true">
                       <i style={{ width: `${page.progress}%` }} />
                     </span>
@@ -507,128 +430,45 @@ export default function PdfWorkspace() {
             </div>
           </aside>
 
-          <div className="comparison-area" ref={readerRef}>
-            <div className="workspace-toolbar">
-              <div>
-                <span className="eyebrow">BILINGUAL VIEW</span>
-                <h2>第 {currentPage} 页</h2>
-              </div>
-              <div className="page-controls">
-                <button
-                  onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
-                  disabled={currentPage === 1}
-                  aria-label="上一页"
-                >←</button>
-                <span>{currentPage} / {documentRecord.page_count}</span>
-                <button
-                  onClick={() => setCurrentPage((page) => Math.min(documentRecord.page_count, page + 1))}
-                  disabled={currentPage === documentRecord.page_count}
-                  aria-label="下一页"
-                >→</button>
-              </div>
-              <div className="toolbar-status">
-                <span className={`status-pill status-${currentSummary?.status || "pending"}`}>
-                  <i />{pageStageLabel(currentSummary) || STATUS_LABEL[currentSummary?.status || "pending"]}
-                </span>
-                <span>目标：{selectedLanguage}</span>
-              </div>
-            </div>
-
-            <div className="reader-options">
-              <label>同步缩放
-                <select aria-label="同步缩放" value={zoom} onChange={(event) => setZoom(Number(event.target.value))}>
-                  <option value={1}>适应宽度</option>
-                  <option value={1.5}>放大 1.5 倍</option>
-                  <option value={2}>放大 2 倍</option>
-                  <option value={3}>放大 3 倍</option>
-                </select>
-              </label>
-              <span>滚动至页边继续滑动，或按 ← → 翻页</span>
-              {hasDismissedNotices && (
-                <button className="pdf-notice-action" type="button" onClick={() => {
-                  setDismissedNotices(previous => {
-                    const next = new Set(previous);
-                    for (const { key } of notices) next.delete(key);
-                    return next;
-                  });
-                }}>查看本页提示</button>
-              )}
-            </div>
-            {notices.filter(({ key }) => !dismissedNotices.has(key)).map(({ key, title, messages, retry }) => (
-              <div className="pdf-page-notice" key={key}>
-                <div className="pdf-page-notice-copy" role="status">
-                  <strong>{title}</strong>
-                  {messages.map((message, index) => <p key={index}>{message}</p>)}
+          <div className="comparison-area">
+            <div className="pdf-reader-controls" ref={controlsRef}>
+              <div className="workspace-toolbar">
+                <div>
+                  <span className="eyebrow">BILINGUAL VIEW</span>
+                  <h2>第 {currentPage} 页</h2>
                 </div>
-                {retry && <button className="pdf-notice-action" type="button" onClick={() => void retryCurrent()}>重试</button>}
-                <button className="pdf-notice-action pdf-notice-close" type="button" aria-label={`关闭提示：${title}`} title="关闭提示"
-                  onClick={() => setDismissedNotices(previous => new Set([...previous, key]))}>
-                  <X size={16} aria-hidden="true" />
-                </button>
+                <div className="page-controls">
+                  <button onClick={() => jumpToPage(currentPage - 1)} disabled={currentPage === 1} aria-label="上一页">←</button>
+                  <span>{currentPage} / {documentRecord.page_count}</span>
+                  <button onClick={() => jumpToPage(currentPage + 1)} disabled={currentPage === documentRecord.page_count} aria-label="下一页">→</button>
+                </div>
+                <div className="toolbar-status">
+                  <span className={`status-pill status-${currentSummary?.status || "pending"}`}>
+                    <i />{pageStageLabel(currentSummary, isDemoTask) || STATUS_LABEL[currentSummary?.status || "pending"]}
+                  </span>
+                  <span>目标：{selectedLanguage}</span>
+                </div>
               </div>
-            ))}
-            <div className="comparison-grid">
-              <article className="document-pane source-pane">
-                <header><span>ORIGINAL</span><strong>原文</strong></header>
-                {fileUrl && (
-                  <PdfCanvas fileUrl={fileUrl} pageNumber={currentPage} zoom={zoom} loadingLabel="正在渲染原文页" />
-                )}
-              </article>
-
-              <article className="document-pane translation-pane">
-                <header><span>{isDemoTask ? "TEST COPY · NOT TRANSLATED" : "TRANSLATION"}</span><strong>{isDemoTask ? "原文副本（未翻译）" : selectedLanguage}</strong></header>
-                {currentResult?.translated_pdf_url ? (
-                  <PdfCanvas
-                    fileUrl={`${currentResult.translated_pdf_url}?v=${encodeURIComponent(currentResult.artifact_revision || "legacy")}`}
-                    pageNumber={1}
-                    displayPageNumber={currentPage}
-                    zoom={zoom}
-                    loadingLabel={isDemoTask ? "正在渲染原文测试副本" : "正在渲染译文 PDF 页"}
-                  />
-                ) : (
-                  <div className="translation-page">
-                    {pageResult?.page_number === currentPage && pageResult.status === "error" ? (
-                    <div className="translation-message error-state">
-                      <span>!</span>
-                      <h3>这一页没有翻译成功</h3>
-                      <p>{pageResult.error || "模型请求失败，请重试。"}</p>
-                      <button className="primary-button" onClick={() => void retryCurrent()}>重新翻译</button>
-                    </div>
-                  ) : (
-                    <div className="translation-message">
-                      <div className="progress-percentage">{visibleProgress?.progress ?? 0}<small>%</small></div>
-                      <h3>{pageStageLabel(visibleProgress) || "等待调度"}</h3>
-                      {elapsedSeconds !== null && <small>本次已等待 {Math.floor(elapsedSeconds / 60)} 分 {elapsedSeconds % 60} 秒（含排队）</small>}
-                      <p>
-                        {visibleProgress?.status === "queued"
-                          ? queueCopy(visibleProgress)
-                          : visibleProgress?.stage === "translating"
-                            ? `正在等待模型返回译文。${visibleProgress.stage_total ? ` 已处理 ${visibleProgress.stage_current}/${visibleProgress.stage_total} 个文本单元。` : ""}${secondsWithoutProgress >= 30 ? ` 已有 ${secondsWithoutProgress} 秒没有新的进度。` : ""}`
-                            : "PDFMathTranslate 正在保留插图和公式，并重建对应的译文页面。"}
-                      </p>
-                      <div
-                        className="translation-progress-track"
-                        role="progressbar"
-                        aria-label={`第 ${currentPage} 页翻译进度`}
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                        aria-valuenow={visibleProgress?.progress ?? 0}
-                      >
-                        <span style={{ width: `${visibleProgress?.progress ?? 0}%` }} />
-                      </div>
-                      <div className="progress-meta">
-                        <span>
-                          {visibleProgress?.status === "queued" && visibleProgress.queue_position
-                            ? `队列第 ${visibleProgress.queue_position} 位`
-                            : STATUS_LABEL[visibleProgress?.status || "pending"]}
-                        </span>
-                        <strong>{visibleProgress?.progress ?? 0}%</strong>
-                      </div>
-                    </div>
-                    )}
-                  </div>
-                )}
-              </article>
+              <div className="reader-options">
+                <label>同步缩放
+                  <select aria-label="同步缩放" value={zoom} onChange={(event) => setZoom(Number(event.target.value))}>
+                    <option value={1}>适应宽度</option>
+                    <option value={1.5}>放大 1.5 倍</option>
+                    <option value={2}>放大 2 倍</option>
+                    <option value={3}>放大 3 倍</option>
+                  </select>
+                </label>
+                <span>连续滚动 · 支持 ← → 翻页</span>
+              </div>
+            </div>
+            <div className="pdf-page-stack" ref={pagesRef} style={{ "--pdf-zoom": zoom } as CSSProperties}>
+              {fileUrl && documentRecord.pages.map(page => {
+                const render = page.page_number >= renderRange.first && page.page_number <= renderRange.last;
+                const translatedUrl = translatedPageUrl(documentRecord.id, page);
+                return <PdfPagePair key={`${documentRecord.id}:${page.page_number}`} page={page} fileUrl={fileUrl}
+                  translatedUrl={translatedUrl} demo={isDemoTask} language={selectedLanguage}
+                  render={render} now={render && !translatedUrl ? clockNow : 0} retry={retryPage} />;
+              })}
             </div>
             {error && <div className="error-banner workspace-error">{error}</div>}
           </div>
