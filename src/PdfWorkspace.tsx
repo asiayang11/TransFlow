@@ -3,6 +3,7 @@ import { X } from "@phosphor-icons/react";
 import PdfCanvas from "./PdfPreview";
 import { LatestRequest } from "./latest-request";
 import AppHeader from "./AppHeader";
+import { usePdfPageGestures } from "./usePdfPageGestures";
 import {
   getDocument,
   getHealth,
@@ -76,6 +77,7 @@ function taskUrl(documentId: string, page: number) {
 
 export default function PdfWorkspace() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const readerRef = useRef<HTMLDivElement>(null);
   const navigationVersion = useRef(0);
   const documentRequest = useRef(new LatestRequest());
   const pageRequest = useRef(new LatestRequest());
@@ -95,6 +97,7 @@ export default function PdfWorkspace() {
   const [clockNow, setClockNow] = useState(Date.now());
   const [dismissedNotices, setDismissedNotices] = useState<ReadonlySet<string>>(() => new Set());
   selectionRef.current = `${documentRecord?.id ?? ""}:${currentPage}`;
+  usePdfPageGestures(readerRef, documentRecord?.id, currentPage, documentRecord?.page_count ?? 0, setCurrentPage);
 
   useEffect(() => {
     if (!documentRecord) return;
@@ -504,7 +507,7 @@ export default function PdfWorkspace() {
             </div>
           </aside>
 
-          <div className="comparison-area">
+          <div className="comparison-area" ref={readerRef}>
             <div className="workspace-toolbar">
               <div>
                 <span className="eyebrow">BILINGUAL VIEW</span>
@@ -540,7 +543,7 @@ export default function PdfWorkspace() {
                   <option value={3}>放大 3 倍</option>
                 </select>
               </label>
-              <span>← → 键翻页 · 两侧保持相同缩放比例</span>
+              <span>滚动至页边继续滑动，或按 ← → 翻页</span>
               {hasDismissedNotices && (
                 <button className="pdf-notice-action" type="button" onClick={() => {
                   setDismissedNotices(previous => {
