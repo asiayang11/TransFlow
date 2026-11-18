@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { X } from "@phosphor-icons/react";
 import PdfCanvas from "./PdfPreview";
 import { LatestRequest } from "./latest-request";
 import AppHeader from "./AppHeader";
@@ -92,6 +93,7 @@ export default function PdfWorkspace() {
   const [changingMode, setChangingMode] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [clockNow, setClockNow] = useState(Date.now());
+  const [dismissedNotices, setDismissedNotices] = useState<ReadonlySet<string>>(() => new Set());
   selectionRef.current = `${documentRecord?.id ?? ""}:${currentPage}`;
 
   useEffect(() => {
@@ -315,7 +317,27 @@ export default function PdfWorkspace() {
   );
 
   const currentSummary = documentRecord?.pages[currentPage - 1];
-  const visibleProgress = pageResult?.page_number === currentPage ? pageResult : currentSummary;
+  const currentResult = pageResult?.page_number === currentPage ? pageResult : null;
+  const visibleProgress = currentResult ?? currentSummary;
+  const noticeScope = `${documentRecord?.id}:${currentPage}:${visibleProgress?.attempt}`;
+  const notices: { key: string; title: string; messages: string[]; retry?: boolean }[] = [];
+  if (visibleProgress?.quality?.status === "needs_review") {
+    notices.push({
+      key: `${noticeScope}:quality:${visibleProgress.artifact_revision ?? ""}`,
+      title: "需复核",
+      messages: visibleProgress.quality.warnings,
+    });
+  }
+  if (currentResult?.translated_pdf_url && currentResult.status !== "ready") {
+    const failed = currentResult.status === "error";
+    notices.push({
+      key: `${noticeScope}:${failed ? "retry-failed" : "retry-active"}`,
+      title: "正在展示上次成功结果",
+      messages: [failed ? currentResult.error || "本次翻译失败，请重试。" : currentResult.stage_label],
+      retry: failed,
+    });
+  }
+  const hasDismissedNotices = notices.some(({ key }) => dismissedNotices.has(key));
   const queuedAt = visibleProgress?.queued_at ? Date.parse(visibleProgress.queued_at) : null;
   const elapsedSeconds = queuedAt === null ? null : Math.max(0, Math.floor((clockNow - queuedAt) / 1000));
   const progressUpdatedAt = visibleProgress?.updated_at ? Date.parse(visibleProgress.updated_at) : NaN;
@@ -519,7 +541,29 @@ export default function PdfWorkspace() {
                 </select>
               </label>
               <span>← → 键翻页 · 两侧保持相同缩放比例</span>
+              {hasDismissedNotices && (
+                <button className="pdf-notice-action" type="button" onClick={() => {
+                  setDismissedNotices(previous => {
+                    const next = new Set(previous);
+                    for (const { key } of notices) next.delete(key);
+                    return next;
+                  });
+                }}>查看本页提示</button>
+              )}
             </div>
+            {notices.filter(({ key }) => !dismissedNotices.has(key)).map(({ key, title, messages, retry }) => (
+              <div className="pdf-page-notice" key={key}>
+                <div className="pdf-page-notice-copy" role="status">
+                  <strong>{title}</strong>
+                  {messages.map((message, index) => <p key={index}>{message}</p>)}
+                </div>
+                {retry && <button className="pdf-notice-action" type="button" onClick={() => void retryCurrent()}>重试</button>}
+                <button className="pdf-notice-action pdf-notice-close" type="button" aria-label={`关闭提示：${title}`} title="关闭提示"
+                  onClick={() => setDismissedNotices(previous => new Set([...previous, key]))}>
+                  <X size={16} aria-hidden="true" />
+                </button>
+              </div>
+            ))}
             <div className="comparison-grid">
               <article className="document-pane source-pane">
                 <header><span>ORIGINAL</span><strong>原文</strong></header>
@@ -530,26 +574,14 @@ export default function PdfWorkspace() {
 
               <article className="document-pane translation-pane">
                 <header><span>{isDemoTask ? "TEST COPY · NOT TRANSLATED" : "TRANSLATION"}</span><strong>{isDemoTask ? "原文副本（未翻译）" : selectedLanguage}</strong></header>
-                {visibleProgress?.quality?.status === "needs_review" && (
-                  <div className="inline-error" role="status">
-                    <strong>需复核（不代表翻译失败）</strong>
-                    {visibleProgress.quality.warnings.map((warning) => <p key={warning}>{warning}</p>)}
-                  </div>
-                )}
-                {pageResult?.page_number === currentPage && pageResult.translated_pdf_url ? (
-                  <>
-                  {pageResult.status !== "ready" && <div className="inline-error" role="status">
-                    正在展示上次成功结果。{pageResult.status === "error" ? pageResult.error : pageResult.stage_label}
-                    {pageResult.status === "error" && <button onClick={() => void retryCurrent()}>重试</button>}
-                  </div>}
+                {currentResult?.translated_pdf_url ? (
                   <PdfCanvas
-                    fileUrl={`${pageResult.translated_pdf_url}?v=${encodeURIComponent(pageResult.artifact_revision || "legacy")}`}
+                    fileUrl={`${currentResult.translated_pdf_url}?v=${encodeURIComponent(currentResult.artifact_revision || "legacy")}`}
                     pageNumber={1}
                     displayPageNumber={currentPage}
                     zoom={zoom}
                     loadingLabel={isDemoTask ? "正在渲染原文测试副本" : "正在渲染译文 PDF 页"}
                   />
-                  </>
                 ) : (
                   <div className="translation-page">
                     {pageResult?.page_number === currentPage && pageResult.status === "error" ? (

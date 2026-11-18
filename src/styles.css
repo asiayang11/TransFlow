@@ -162,6 +162,12 @@ button { color: inherit; }
 .error-state > span { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 50%; background: #fae6dd; color: #bd5938; font-weight: 700; }
 .error-state .primary-button { margin-top: 2px; }
 .inline-error { color: #9f4026; padding: 16px; }
+.pdf-page-notice { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font-size: 13px; }
+.pdf-page-notice-copy { flex: 1; min-width: 0; overflow-wrap: anywhere; align-self: center; }
+.pdf-page-notice-copy p { margin: 4px 0 0; color: var(--muted); }
+.pdf-notice-action { flex: none; min-height: 30px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); cursor: pointer; }
+.pdf-notice-action:hover { background: var(--surface-hover); }
+.pdf-notice-close { width: 30px; padding: 0; display: grid; place-items: center; }
 .workspace-error { position: fixed; right: 28px; bottom: 24px; max-width: 420px; box-shadow: 0 12px 30px rgba(73,41,31,.12); }
 
 @media (max-width: 980px) {
